@@ -3,3 +3,5 @@
  * This module must stay free of React, HTTP servers, databases and import-time I/O.
  */
 export const engineStatus = { implemented: false } as const;
+
+export * from './world.js';
