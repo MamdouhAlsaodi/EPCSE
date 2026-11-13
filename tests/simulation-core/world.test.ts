@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { createWorld, createWorldDomain, engineStatus } from '@epcse/simulation-core';
+import {
+  COMMODITIES,
+  createWorld,
+  createWorldDomain,
+  engineStatus,
+  type Commodity,
+} from '@epcse/simulation-core';
 
 describe('world identity and snapshots', () => {
   it('createWorld stores a nonempty world id and starts at tick 0', () => {
@@ -187,6 +193,18 @@ describe('kingdom, city, and establishment ownership', () => {
       cities: [{ id: 'city-river', kingdomId: 'kingdom-north' }],
       establishments: [{ id: 'mill', cityId: 'city-river', ownerKingdomId: 'kingdom-south' }],
     });
+  });
+});
+
+describe('canonical commodity catalog', () => {
+  it('enumerates exactly the supported commodities in stable order', () => {
+    const knownCommodities: readonly Commodity[] = ['grain', 'wood', 'tools'];
+    expect(COMMODITIES).toEqual(knownCommodities);
+  });
+
+  it('contains identities only, without implied price or stock', () => {
+    expect(COMMODITIES).toEqual(['grain', 'wood', 'tools']);
+    expect(COMMODITIES.every((commodity) => typeof commodity === 'string')).toBe(true);
   });
 });
 
