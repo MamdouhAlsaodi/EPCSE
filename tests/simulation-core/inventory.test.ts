@@ -101,3 +101,128 @@ describe('inventory transfers', () => {
     ).toThrow(/unknown owner/);
   });
 });
+
+describe('explicit production', () => {
+  // Synthetic/provisional recipe example only; production is driven by caller-supplied data.
+  it('consumes recipe inputs and adds recipe outputs for a batch', () => {
+    const inventory = createInventory({
+      owners: ['north'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 8 }],
+    });
+
+    inventory.produce(
+      'north',
+      {
+        inputs: [{ commodity: 'grain', quantity: 2 }],
+        outputs: [{ commodity: 'tools', quantity: 1 }],
+      },
+      3,
+    );
+
+    expect(inventory.getState()).toEqual({
+      balances: [
+        { ownerId: 'north', commodity: 'grain', quantity: 2 },
+        { ownerId: 'north', commodity: 'tools', quantity: 3 },
+      ],
+    });
+  });
+
+  it('requires gross inputs before applying overlapping recipe outputs', () => {
+    const inventory = createInventory({
+      owners: ['north'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 2 }],
+    });
+    const recipe = {
+      inputs: [{ commodity: 'grain' as const, quantity: 3 }],
+      outputs: [{ commodity: 'grain' as const, quantity: 4 }],
+    };
+    const before = inventory.getState();
+
+    expect(() => inventory.produce('north', recipe, 1)).toThrow(/insufficient/);
+    expect(inventory.getState()).toEqual(before);
+
+    const sufficient = createInventory({
+      owners: ['north'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 3 }],
+    });
+    sufficient.produce('north', recipe, 1);
+    expect(sufficient.getState()).toEqual({
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 4 }],
+    });
+  });
+
+  it('rejects invalid recipes and arithmetic atomically', () => {
+    const inventory = createInventory({
+      owners: ['north'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 5 }],
+    });
+    const before = inventory.getState();
+    const valid = {
+      inputs: [{ commodity: 'grain' as const, quantity: 1 }],
+      outputs: [{ commodity: 'tools' as const, quantity: 1 }],
+    };
+    const invalidRecipes = [
+      { ...valid, inputs: [] },
+      { ...valid, outputs: [] },
+      { ...valid, inputs: [{ commodity: 'grain' as const, quantity: 0 }] },
+      {
+        ...valid,
+        inputs: [
+          { commodity: 'grain' as const, quantity: 1 },
+          { commodity: 'grain' as const, quantity: 2 },
+        ],
+      },
+    ];
+
+    for (const recipe of invalidRecipes) {
+      expect(() => inventory.produce('north', recipe, 1)).toThrow();
+      expect(inventory.getState()).toEqual(before);
+    }
+    expect(() => inventory.produce('missing', valid, 1)).toThrow(/unknown owner/);
+    expect(() => inventory.produce('north', valid, 0)).toThrow(/batch count/);
+    expect(() => inventory.produce('north', valid, 2)).not.toThrow();
+  });
+
+  it('rejects a batch total that exceeds safe integer range before mutation', () => {
+    const inventory = createInventory({
+      owners: ['north'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: Number.MAX_SAFE_INTEGER }],
+    });
+    const before = inventory.getState();
+
+    expect(() =>
+      inventory.produce(
+        'north',
+        {
+          inputs: [{ commodity: 'grain', quantity: Number.MAX_SAFE_INTEGER }],
+          outputs: [{ commodity: 'tools', quantity: 1 }],
+        },
+        2,
+      ),
+    ).toThrow(/exceed/);
+    expect(inventory.getState()).toEqual(before);
+  });
+
+  it('rejects output overflow without consuming inputs', () => {
+    const inventory = createInventory({
+      owners: ['north'],
+      balances: [
+        { ownerId: 'north', commodity: 'grain', quantity: 2 },
+        { ownerId: 'north', commodity: 'tools', quantity: Number.MAX_SAFE_INTEGER },
+      ],
+    });
+    const before = inventory.getState();
+
+    expect(() =>
+      inventory.produce(
+        'north',
+        {
+          inputs: [{ commodity: 'grain', quantity: 1 }],
+          outputs: [{ commodity: 'tools', quantity: 1 }],
+        },
+        1,
+      ),
+    ).toThrow(/exceed/);
+    expect(inventory.getState()).toEqual(before);
+  });
+});
