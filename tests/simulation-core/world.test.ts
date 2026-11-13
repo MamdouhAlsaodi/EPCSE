@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createWorld, engineStatus } from '@epcse/simulation-core';
+import { createWorld, createWorldDomain, engineStatus } from '@epcse/simulation-core';
 
 describe('world identity and snapshots', () => {
   it('createWorld stores a nonempty world id and starts at tick 0', () => {
@@ -106,6 +106,86 @@ describe('tick count validation', () => {
     expect(world.getState()).toEqual({
       worldId: 'w',
       tick: Number.MAX_SAFE_INTEGER,
+    });
+  });
+});
+
+describe('kingdom, city, and establishment ownership', () => {
+  it('rejects duplicate kingdom IDs', () => {
+    expect(() =>
+      createWorldDomain({
+        kingdoms: [{ id: 'k' }, { id: 'k' }],
+        cities: [],
+        establishments: [],
+      }),
+    ).toThrow(/duplicate kingdom id/);
+  });
+
+  it('rejects cities that reference a missing kingdom', () => {
+    expect(() =>
+      createWorldDomain({
+        kingdoms: [],
+        cities: [{ id: 'c', kingdomId: 'missing' }],
+        establishments: [],
+      }),
+    ).toThrow(/unknown kingdom/);
+  });
+
+  it('rejects establishments with a missing city or owner kingdom', () => {
+    expect(() =>
+      createWorldDomain({
+        kingdoms: [{ id: 'k' }],
+        cities: [{ id: 'c', kingdomId: 'k' }],
+        establishments: [{ id: 'e', cityId: 'missing', ownerKingdomId: 'k' }],
+      }),
+    ).toThrow(/unknown city/);
+    expect(() =>
+      createWorldDomain({
+        kingdoms: [{ id: 'k' }],
+        cities: [{ id: 'c', kingdomId: 'k' }],
+        establishments: [{ id: 'e', cityId: 'c', ownerKingdomId: 'missing' }],
+      }),
+    ).toThrow(/unknown owner kingdom/);
+  });
+
+  it('rejects duplicate establishment IDs', () => {
+    expect(() =>
+      createWorldDomain({
+        kingdoms: [{ id: 'k' }],
+        cities: [{ id: 'c', kingdomId: 'k' }],
+        establishments: [
+          { id: 'e', cityId: 'c', ownerKingdomId: 'k' },
+          { id: 'e', cityId: 'c', ownerKingdomId: 'k' },
+        ],
+      }),
+    ).toThrow(/duplicate establishment id/);
+  });
+
+  it('returns read-only snapshots with explicit independent establishment ownership', () => {
+    const domain = createWorldDomain({
+      kingdoms: [{ id: 'kingdom-north' }, { id: 'kingdom-south' }],
+      cities: [{ id: 'city-river', kingdomId: 'kingdom-north' }],
+      establishments: [{ id: 'mill', cityId: 'city-river', ownerKingdomId: 'kingdom-south' }],
+    });
+
+    expect(domain.getState()).toEqual({
+      kingdoms: [{ id: 'kingdom-north' }, { id: 'kingdom-south' }],
+      cities: [{ id: 'city-river', kingdomId: 'kingdom-north' }],
+      establishments: [{ id: 'mill', cityId: 'city-river', ownerKingdomId: 'kingdom-south' }],
+    });
+    expect(domain.getState()).not.toBe(domain.getState());
+    const mutable = domain.getState() as {
+      kingdoms: { id: string }[];
+      cities: { id: string; kingdomId: string }[];
+      establishments: { id: string; cityId: string; ownerKingdomId: string }[];
+    };
+    mutable.kingdoms[0]!.id = 'changed';
+    mutable.cities.pop();
+    mutable.establishments[0]!.ownerKingdomId = 'kingdom-north';
+    expect(domain.getState()).toEqual({
+      kingdoms: [{ id: 'kingdom-north' }, { id: 'kingdom-south' }],
+      cities: [{ id: 'city-river', kingdomId: 'kingdom-north' }],
+      establishments: [{ id: 'mill', cityId: 'city-river', ownerKingdomId: 'kingdom-south' }],
     });
   });
 });
