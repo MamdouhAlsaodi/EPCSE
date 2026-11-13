@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/simulation-core" },
+    { "path": "packages/scenarios" },
+    { "path": "apps/cli" }
+  ]
+}

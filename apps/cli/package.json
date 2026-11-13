@@ -1,0 +1,19 @@
+{
+  "name": "@epcse/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "epcse": "./dist/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/main.ts",
+      "default": "./src/main.ts"
+    }
+  },
+  "dependencies": {
+    "@epcse/scenarios": "workspace:*",
+    "@epcse/simulation-core": "workspace:*"
+  }
+}
