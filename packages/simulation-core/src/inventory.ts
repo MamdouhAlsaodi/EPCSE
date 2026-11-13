@@ -28,6 +28,7 @@ export interface InventorySnapshot {
 }
 
 export interface Inventory {
+  hasOwner(ownerId: string): boolean;
   getState(): InventorySnapshot;
   transfer(
     fromOwnerId: string,
@@ -85,6 +86,7 @@ export function createInventory(input: InventoryInput): Inventory {
   });
 
   return {
+    hasOwner: (ownerId) => owners.has(ownerId),
     getState: snapshot,
     transfer: (fromOwnerId, toOwnerId, commodity, quantity) => {
       if (!owners.has(fromOwnerId)) throw new RangeError(`unknown source owner: ${fromOwnerId}`);
