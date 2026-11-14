@@ -22,6 +22,7 @@ export interface RouteNetworkInput {
   readonly transitOwnerId: string;
   readonly inventory: Inventory;
   readonly routes?: readonly RouteInput[];
+  readonly initialState?: RouteNetworkSnapshot;
 }
 
 export interface ShipmentInput {
@@ -103,8 +104,83 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     }
     routes.set(route.routeId, { ...route });
   }
-  let shipments: Shipment[] = [];
-  let tick = 0;
+  const initialState = input.initialState;
+  if (
+    initialState &&
+    (!Array.isArray(initialState.shipments) || !Array.isArray(initialState.routes))
+  )
+    throw new RangeError('invalid initial route state');
+  let tick = initialState?.tick ?? 0;
+  let shipments: Shipment[] = initialState?.shipments.map((shipment) => ({ ...shipment })) ?? [];
+  if (!Number.isSafeInteger(tick) || tick < 0) throw new RangeError('invalid initial route tick');
+  if (
+    initialState &&
+    (initialState.routes.length !== routes.size ||
+      new Set(initialState.routes.map((route) => route.routeId)).size !== routes.size ||
+      initialState.routes.some((route) => {
+        const configured = routes.get(route.routeId);
+        return (
+          !configured ||
+          route.sourceCityId !== configured.sourceCityId ||
+          route.destinationCityId !== configured.destinationCityId ||
+          route.travelTicks !== configured.travelTicks ||
+          route.capacity !== configured.capacity
+        );
+      }))
+  )
+    throw new RangeError('initial routes do not match configured routes');
+  const shipmentIds = new Set<string>();
+  for (const shipment of shipments) {
+    validateId(shipment.shipmentId, 'shipment id');
+    if (shipmentIds.has(shipment.shipmentId))
+      throw new RangeError(`duplicate shipment id: ${shipment.shipmentId}`);
+    shipmentIds.add(shipment.shipmentId);
+    if (!['grain', 'wood', 'tools'].includes(shipment.commodity))
+      throw new RangeError('invalid initial shipment commodity');
+    if (shipment.status !== 'in-transit' && shipment.status !== 'arrived')
+      throw new RangeError('invalid initial shipment status');
+    const route = routes.get(shipment.routeId);
+    if (
+      !route ||
+      !Number.isSafeInteger(shipment.quantity) ||
+      shipment.quantity <= 0 ||
+      !Number.isSafeInteger(shipment.departureTick) ||
+      shipment.departureTick < 0 ||
+      !Number.isSafeInteger(shipment.arrivalTick) ||
+      shipment.arrivalTick <= shipment.departureTick ||
+      shipment.arrivalTick !== shipment.departureTick + route.travelTicks ||
+      shipment.departureTick > tick ||
+      (shipment.status === 'in-transit'
+        ? shipment.arrivalTick <= tick
+        : shipment.arrivalTick > tick)
+    )
+      throw new RangeError('invalid initial shipment state');
+  }
+  const transitTotals = new Map<string, number>();
+  for (const shipment of shipments)
+    if (shipment.status === 'in-transit') {
+      const key = shipment.commodity;
+      const total = (transitTotals.get(key) ?? 0) + shipment.quantity;
+      if (!Number.isSafeInteger(total)) throw new RangeError('invalid initial transit total');
+      transitTotals.set(key, total);
+    }
+  for (const [commodity, quantity] of transitTotals) {
+    const actual =
+      input.inventory
+        .getState()
+        .balances.find(
+          (balance) => balance.ownerId === transitOwnerId && balance.commodity === commodity,
+        )?.quantity ?? 0;
+    if (actual !== quantity)
+      throw new RangeError('initial transit inventory does not match shipments');
+  }
+  for (const balance of input.inventory.getState().balances) {
+    if (
+      balance.ownerId === transitOwnerId &&
+      (transitTotals.get(balance.commodity) ?? 0) !== balance.quantity
+    )
+      throw new RangeError('initial transit inventory does not match shipments');
+  }
   const snapshot = (): RouteNetworkSnapshot => ({
     tick,
     routes: [...routes.values()].map((route) => ({ ...route })),

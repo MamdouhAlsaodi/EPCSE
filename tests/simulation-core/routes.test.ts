@@ -20,6 +20,102 @@ describe('route shipments', () => {
     ).toThrow(/transit/);
   });
 
+  it('rejects malformed initial shipment identifiers, statuses, and temporal state', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'transit', commodity: 'grain', quantity: 2 }],
+    });
+    const route = {
+      routeId: 'road',
+      sourceCityId: 'north',
+      destinationCityId: 'south',
+      travelTicks: 2,
+    };
+    const base = {
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [route],
+      initialState: {
+        tick: 1,
+        routes: [route],
+        shipments: [
+          {
+            shipmentId: 'load',
+            routeId: 'road',
+            commodity: 'grain' as const,
+            quantity: 1,
+            departureTick: 0,
+            arrivalTick: 2,
+            status: 'in-transit' as const,
+          },
+        ],
+      },
+    };
+    expect(() =>
+      createRouteNetwork({
+        ...base,
+        initialState: {
+          ...base.initialState,
+          shipments: [{ ...base.initialState.shipments[0]!, shipmentId: '' }],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      createRouteNetwork({
+        ...base,
+        initialState: {
+          ...base.initialState,
+          shipments: [base.initialState.shipments[0]!, base.initialState.shipments[0]!],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      createRouteNetwork({
+        ...base,
+        initialState: {
+          ...base.initialState,
+          shipments: [{ ...base.initialState.shipments[0]!, status: 'invalid' as 'in-transit' }],
+        },
+      }),
+    ).toThrow();
+    expect(() =>
+      createRouteNetwork({
+        ...base,
+        initialState: {
+          ...base.initialState,
+          shipments: [{ ...base.initialState.shipments[0]!, arrivalTick: 3 }],
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('rejects duplicate snapshot route IDs that omit a configured route', () => {
+    const inventory = createInventory({ owners: ['north', 'south', 'east', 'transit'] });
+    const first = {
+      routeId: 'road',
+      sourceCityId: 'north',
+      destinationCityId: 'south',
+      travelTicks: 1,
+    };
+    const second = {
+      routeId: 'river',
+      sourceCityId: 'north',
+      destinationCityId: 'east',
+      travelTicks: 2,
+    };
+
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: [first, second],
+        initialState: { tick: 0, routes: [first, first], shipments: [] },
+      }),
+    ).toThrow(/initial routes/i);
+  });
+
   it('preflights all due destination capacity before changing inventory or tick', () => {
     const inventory = createInventory({
       owners: ['north', 'south', 'transit'],
