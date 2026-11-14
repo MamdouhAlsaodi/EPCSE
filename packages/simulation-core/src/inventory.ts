@@ -36,6 +36,7 @@ export interface Inventory {
     commodity: Commodity,
     quantity: number,
   ): InventorySnapshot;
+  consume(ownerId: string, commodity: Commodity, quantity: number): InventorySnapshot;
   produce(ownerId: string, recipe: ProductionRecipe, batchCount: number): InventorySnapshot;
 }
 
@@ -113,6 +114,25 @@ export function createInventory(input: InventoryInput): Inventory {
       }
       balances.set(sourceKey, sourceBalance - quantity);
       balances.set(destinationKey, destinationBalance + quantity);
+      return snapshot();
+    },
+    consume: (ownerId, commodity, quantity) => {
+      if (!owners.has(ownerId)) throw new RangeError(`unknown owner: ${ownerId}`);
+      validateCommodity(commodity);
+      if (
+        typeof quantity !== 'number' ||
+        !Number.isFinite(quantity) ||
+        !Number.isInteger(quantity)
+      ) {
+        throw new TypeError('quantity must be a finite integer');
+      }
+      if (quantity <= 0 || !Number.isSafeInteger(quantity)) {
+        throw new RangeError('consume quantity must be a positive safe integer');
+      }
+      const balanceKey = key(ownerId, commodity);
+      const current = balances.get(balanceKey) ?? 0;
+      if (current < quantity) throw new RangeError('insufficient inventory');
+      balances.set(balanceKey, current - quantity);
       return snapshot();
     },
     produce: (ownerId, recipe, batchCount) => {

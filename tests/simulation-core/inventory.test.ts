@@ -45,6 +45,22 @@ describe('inventory transfers', () => {
     }
   });
 
+  it('consumes owned stock atomically', () => {
+    const inventory = createInventory({
+      owners: ['household'],
+      balances: [{ ownerId: 'household', commodity: 'grain', quantity: 4 }],
+    });
+
+    inventory.consume('household', 'grain', 3);
+
+    expect(inventory.getState()).toEqual({
+      balances: [{ ownerId: 'household', commodity: 'grain', quantity: 1 }],
+    });
+    const before = inventory.getState();
+    expect(() => inventory.consume('household', 'grain', 2)).toThrow(/insufficient/);
+    expect(inventory.getState()).toEqual(before);
+  });
+
   it('rejects insufficient stock and unknown owners without mutation', () => {
     const inventory = createInventory({
       owners: ['north', 'south'],
