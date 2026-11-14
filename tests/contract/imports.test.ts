@@ -9,21 +9,22 @@ describe('bootstrap import contract', () => {
     expect(engineStatus).toEqual({ implemented: false });
   });
 
-  it('scenarios imports simulation-core through the real workspace link', () => {
+  it('scenarios imports simulation-core and reports its limited scripted scope', () => {
     expect(scenarioStatus).toEqual({
-      implemented: false,
+      implemented: true,
+      kind: 'limited-scripted-demonstration',
       core: '@epcse/simulation-core',
       coreImplemented: false,
     });
   });
 
-  it('the CLI reports an explicit stub with no fictional simulation data', () => {
-    expect(run()).toEqual([
-      'EPCSE CLI - Economic, Political & Civilization Simulation Engine',
-      'simulation-core: no simulation implemented',
-      'scenarios: no scenarios implemented',
-      'This is a bootstrap stub; no simulation, economics or world rules exist yet.',
-    ]);
+  it('the CLI reports the scripted demonstration without claiming a full engine', () => {
+    const output = run();
+    expect(output).toContain('simulation-core: full engine not implemented');
+    expect(output).toContain('scenarios: limited scripted demonstration available');
+    expect(output).toContain('Two-city scripted demonstration (synthetic/provisional)');
+    expect(output).toContain('Tick 100; cities: harbor (120), inland (80)');
+    expect(output.at(-1)).toMatch(/not a complete S0 or economic simulation/i);
   });
 
   it('workspace packages declare no dependencies outside this workspace', () => {
