@@ -5,3 +5,4 @@
 export const engineStatus = { implemented: false } as const;
 
 export * from './world.js';
+export * from './domain.js';
