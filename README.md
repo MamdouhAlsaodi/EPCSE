@@ -19,3 +19,11 @@ corepack pnpm@10.28.2 build
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same commands on pull requests and pushes with pinned Node and pnpm versions.
+
+## Open source and attribution
+
+EPCSE is available under the [MIT License](LICENSE). You may use, modify, share, and sell the engine or code, including as part of commercial games, subject to the license terms. No royalty is required by this license.
+
+**Mamdouh Alsaodi (ممدوح السعودي)** is a contributor to EPCSE. If this project helps you build something, a mention of Mamdouh and a link back to this repository would be sincerely appreciated: recognition helps contributors share their work and encourages open-source development. This request is voluntary and does not add a requirement beyond the MIT License.
+
+The templates in [`docs/spec-kit-templates/`](docs/spec-kit-templates/) originate from [GitHub Spec Kit](https://github.com/github/spec-kit) and retain [GitHub's MIT license notice](docs/spec-kit-templates/LICENSE).
