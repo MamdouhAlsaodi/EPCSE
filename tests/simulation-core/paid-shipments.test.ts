@@ -28,6 +28,27 @@ const makeShipmentSystem = () => {
 };
 
 describe('paid shipments', () => {
+  it('rejects paid departures on a closed route without settling money or moving goods', () => {
+    const { inventory, money, network, coordinator } = makeShipmentSystem();
+    network.closeRoute('road');
+    const before = {
+      inventory: inventory.getState(),
+      money: money.getState(),
+      network: network.getState(),
+    };
+    expect(() =>
+      coordinator.depart({
+        shipment: { shipmentId: 'closed-load', routeId: 'road', commodity: 'grain', quantity: 1 },
+        buyerAccountId: 'buyer-cash',
+        sellerAccountId: 'seller-cash',
+        payment: 10,
+      }),
+    ).toThrow(/closed/i);
+    expect(inventory.getState()).toEqual(before.inventory);
+    expect(money.getState()).toEqual(before.money);
+    expect(network.getState()).toEqual(before.network);
+  });
+
   it('atomically departs goods and settles the caller-supplied payment', () => {
     const { inventory, money, network, coordinator } = makeShipmentSystem();
 
