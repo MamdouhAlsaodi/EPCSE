@@ -13,7 +13,7 @@ export interface TickContext {
   readonly tick: number;
 }
 
-/** Synchronous operation invoked once per tick, in registration order. */
+/** Synchronous operation invoked once per tick, in phase then registration order. */
 export type TickSystem = (context: TickContext) => void;
 
 export type WorldStatus =
@@ -25,8 +25,8 @@ export interface World {
   getState(): WorldSnapshot;
   /** Current tick-processing status. On failure, earlier systems may already have mutated state; no rollback is attempted. */
   getStatus(): WorldStatus;
-  /** Register a uniquely named system; it runs on subsequent ticks. */
-  registerTickSystem(name: string, system: TickSystem): void;
+  /** Register a uniquely named system for subsequent ticks; phase defaults to 0. */
+  registerTickSystem(name: string, system: TickSystem, phase?: number): void;
   /** Advance by exactly one tick. */
   step(): WorldSnapshot;
   /** Advance by exactly n ticks (0 accepted). */
@@ -43,7 +43,8 @@ export function createWorld(worldId: string): World {
   let tick = 0;
   let failed: Extract<WorldStatus, { state: 'failed' }> | undefined;
   let advancing = false;
-  const systems = new Map<string, TickSystem>();
+  const systems = new Map<string, { system: TickSystem; phase: number; order: number }>();
+  let nextSystemOrder = 0;
   const snapshot = (): WorldSnapshot => ({ worldId, tick });
   const advance = (ticks: number): WorldSnapshot => {
     if (failed) {
@@ -76,7 +77,10 @@ export function createWorld(worldId: string): World {
         tick++;
         const context: TickContext = { worldId, tick };
         // Freeze this tick's system list; registrations during a tick start next tick.
-        for (const [name, system] of [...systems.entries()]) {
+        const tickSystems = [...systems.entries()].sort(
+          ([, a], [, b]) => a.phase - b.phase || a.order - b.order,
+        );
+        for (const [name, { system }] of tickSystems) {
           try {
             const result: unknown = system(context);
             if ((typeof result === 'object' && result !== null) || typeof result === 'function') {
@@ -104,7 +108,7 @@ export function createWorld(worldId: string): World {
   return {
     getState: snapshot,
     getStatus: () => (failed ? { ...failed } : { state: 'ready' }),
-    registerTickSystem: (name, system) => {
+    registerTickSystem: (name, system, phase = 0) => {
       if (typeof name !== 'string' || name.length === 0) {
         throw new RangeError('tick system name must be a nonempty string');
       }
@@ -114,7 +118,10 @@ export function createWorld(worldId: string): World {
       if (typeof system !== 'function') {
         throw new TypeError('tick system must be a function');
       }
-      systems.set(name, system);
+      if (!Number.isSafeInteger(phase)) {
+        throw new TypeError('tick system phase must be a safe integer');
+      }
+      systems.set(name, { system, phase, order: nextSystemOrder++ });
     },
     step: () => advance(1),
     run: advance,

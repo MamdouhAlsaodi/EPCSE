@@ -75,6 +75,29 @@ describe('advancing ticks', () => {
     expect(b.getState()).toEqual({ worldId: 'shared-id', tick: 0 });
   });
 
+  it('runs explicitly phased tick systems by ascending phase instead of registration order', () => {
+    const world = createWorld('w');
+    const calls: string[] = [];
+    world.registerTickSystem('later-phase', () => calls.push('later'), 2);
+    world.registerTickSystem('earlier-phase', () => calls.push('earlier'), -1);
+
+    world.step();
+
+    expect(calls).toEqual(['earlier', 'later']);
+  });
+
+  it('preserves registration order for systems in the same phase', () => {
+    const world = createWorld('w');
+    const calls: string[] = [];
+    world.registerTickSystem('first', () => calls.push('first'), 7);
+    world.registerTickSystem('second', () => calls.push('second'), 7);
+    world.registerTickSystem('default', () => calls.push('default'));
+
+    world.step();
+
+    expect(calls).toEqual(['default', 'first', 'second']);
+  });
+
   it('runs registered tick systems in registration order on every tick', () => {
     const world = createWorld('w');
     const calls: string[] = [];
@@ -104,6 +127,21 @@ describe('advancing ticks', () => {
     expect(world.getStatus()).toEqual({ state: 'failed', tick: 1, systemName: 'async-result' });
     expect(() => world.step()).toThrow(/failed tick/);
     expect(world.getState()).toEqual({ worldId: 'w', tick: 1 });
+  });
+
+  it('attributes failure to the actual system selected by phase ordering', () => {
+    const world = createWorld('w');
+    world.registerTickSystem('registered-first', () => undefined, 10);
+    world.registerTickSystem(
+      'phase-failure',
+      () => {
+        throw new Error('phase failed');
+      },
+      -10,
+    );
+
+    expect(() => world.step()).toThrow('phase failed');
+    expect(world.getStatus()).toEqual({ state: 'failed', tick: 1, systemName: 'phase-failure' });
   });
 
   it('records a failed tick and system without undoing earlier side effects', () => {
@@ -150,8 +188,10 @@ describe('advancing ticks', () => {
     world.registerTickSystem('register-later', ({ tick }) => {
       calls.push(`register:${tick}`);
       if (tick === 1) {
-        world.registerTickSystem('later', ({ tick: laterTick }) =>
-          calls.push(`later:${laterTick}`),
+        world.registerTickSystem(
+          'later',
+          ({ tick: laterTick }) => calls.push(`later:${laterTick}`),
+          -1,
         );
       }
     });
@@ -159,7 +199,27 @@ describe('advancing ticks', () => {
     world.step();
     expect(calls).toEqual(['register:1']);
     world.step();
-    expect(calls).toEqual(['register:1', 'register:2', 'later:2']);
+    expect(calls).toEqual(['register:1', 'later:2', 'register:2']);
+  });
+});
+
+describe('tick phase validation', () => {
+  it('rejects phases that are not safe integers without registering the system', () => {
+    const world = createWorld('w');
+    const invalid = [
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.NEGATIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+    ];
+    for (const phase of invalid) {
+      expect(() =>
+        world.registerTickSystem(`invalid-${String(phase)}`, () => undefined, phase),
+      ).toThrow(/phase must be a safe integer/);
+    }
+    world.registerTickSystem('valid', () => undefined, Number.MAX_SAFE_INTEGER);
+    expect(() => world.step()).not.toThrow();
   });
 });
 
