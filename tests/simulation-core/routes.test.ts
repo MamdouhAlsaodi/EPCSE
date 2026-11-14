@@ -115,6 +115,123 @@ describe('route shipments', () => {
     }
   });
 
+  it('shares bounded capacity across in-transit shipments and releases it on arrival', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 6 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        {
+          routeId: 'road',
+          sourceCityId: 'north',
+          destinationCityId: 'south',
+          travelTicks: 2,
+          capacity: 5,
+        },
+      ],
+    });
+
+    network.depart({ shipmentId: 'load-1', routeId: 'road', commodity: 'grain', quantity: 3 });
+    network.depart({ shipmentId: 'load-2', routeId: 'road', commodity: 'grain', quantity: 2 });
+    const beforeInventory = inventory.getState();
+    const beforeNetwork = network.getState();
+    expect(() =>
+      network.depart({ shipmentId: 'load-3', routeId: 'road', commodity: 'grain', quantity: 1 }),
+    ).toThrow(/capacity/);
+    expect(inventory.getState()).toEqual(beforeInventory);
+    expect(network.getState()).toEqual(beforeNetwork);
+
+    network.advanceTick();
+    network.advanceTick();
+    network.depart({ shipmentId: 'load-3', routeId: 'road', commodity: 'grain', quantity: 1 });
+    expect(network.getState().shipments).toMatchObject([
+      { shipmentId: 'load-1', status: 'arrived' },
+      { shipmentId: 'load-2', status: 'arrived' },
+      { shipmentId: 'load-3', status: 'in-transit' },
+    ]);
+  });
+
+  it('shares capacity across commodities and rejects over-capacity departures without mutation', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [
+        { ownerId: 'north', commodity: 'grain', quantity: 3 },
+        { ownerId: 'north', commodity: 'tools', quantity: 3 },
+      ],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        {
+          routeId: 'road',
+          sourceCityId: 'north',
+          destinationCityId: 'south',
+          travelTicks: 2,
+          capacity: 5,
+        },
+      ],
+    });
+
+    network.depart({ shipmentId: 'grain-load', routeId: 'road', commodity: 'grain', quantity: 3 });
+    network.depart({ shipmentId: 'tools-load', routeId: 'road', commodity: 'tools', quantity: 2 });
+    const beforeInventory = inventory.getState();
+    const beforeNetwork = network.getState();
+
+    expect(() =>
+      network.depart({
+        shipmentId: 'extra-tools',
+        routeId: 'road',
+        commodity: 'tools',
+        quantity: 1,
+      }),
+    ).toThrow(/capacity/);
+    expect(inventory.getState()).toEqual(beforeInventory);
+    expect(network.getState()).toEqual(beforeNetwork);
+  });
+
+  it('leaves routes without capacity unlimited', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 6 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 2 },
+      ],
+    });
+
+    network.depart({ shipmentId: 'load-1', routeId: 'road', commodity: 'grain', quantity: 4 });
+    network.depart({ shipmentId: 'load-2', routeId: 'road', commodity: 'grain', quantity: 2 });
+    expect(network.getState().shipments).toHaveLength(2);
+  });
+
+  it('rejects invalid route capacities', () => {
+    const inventory = createInventory({ owners: ['north', 'south', 'transit'] });
+    const base = {
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+    };
+    const route = {
+      routeId: 'road',
+      sourceCityId: 'north',
+      destinationCityId: 'south',
+      travelTicks: 1,
+    };
+    for (const capacity of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => createRouteNetwork({ ...base, routes: [{ ...route, capacity }] })).toThrow();
+    }
+  });
+
   it('moves goods into transit at departure and delivers them on the due tick', () => {
     const inventory = createInventory({
       owners: ['north', 'south', 'transit'],
