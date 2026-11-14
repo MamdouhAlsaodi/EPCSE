@@ -205,6 +205,11 @@ export function createInventory(input: InventoryInput): Inventory {
       readonly commodity: Commodity;
       readonly quantity: number;
     }[],
+    consumes: readonly {
+      readonly ownerId: string;
+      readonly commodity: Commodity;
+      readonly quantity: number;
+    }[] = [],
   ): (() => void) => {
     const stagedBalances = new Map(balances);
     for (const { fromOwnerId, toOwnerId, commodity, quantity } of transfers) {
@@ -226,12 +231,33 @@ export function createInventory(input: InventoryInput): Inventory {
       stagedBalances.set(sourceKey, sourceBalance - quantity);
       stagedBalances.set(destinationKey, destinationBalance + quantity);
     }
+    for (const { ownerId, commodity, quantity } of consumes) {
+      if (!owners.has(ownerId)) throw new RangeError(`unknown owner: ${ownerId}`);
+      validateCommodity(commodity);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+        throw new RangeError('consume quantity must be a positive safe integer');
+      }
+      const balanceKey = key(ownerId, commodity);
+      const current = stagedBalances.get(balanceKey) ?? 0;
+      if (current < quantity) throw new RangeError('insufficient inventory');
+      stagedBalances.set(balanceKey, current - quantity);
+    }
     return () => {
       balances = stagedBalances;
     };
   };
+  const inventoryHasOwner = api.hasOwner;
+  const inventoryTransfer = api.transfer;
+  const inventoryConsume = api.consume;
+  const inventoryProduce = api.produce;
   registerTransactionParticipant(api, {
     inventory: {
+      isCurrent: () =>
+        api.hasOwner === inventoryHasOwner &&
+        api.getState === snapshot &&
+        api.transfer === inventoryTransfer &&
+        api.consume === inventoryConsume &&
+        api.produce === inventoryProduce,
       prepareTransfers,
       prepareTransfer: (fromOwnerId, toOwnerId, commodity, quantity) =>
         prepareTransfers([{ fromOwnerId, toOwnerId, commodity, quantity }]),

@@ -4,6 +4,7 @@ import type { Inventory } from './inventory.js';
 import type { MoneyLedger } from './money.js';
 import type { PopulationCohortInput, PopulationNeed } from './population.js';
 import type { World } from './world.js';
+import { getTransactionParticipant } from './transaction-internal.js';
 
 export interface ConsumptionSystemInput {
   readonly world: World;
@@ -27,6 +28,27 @@ export interface ConsumptionSystem {
 }
 
 export function createConsumptionSystem(input: ConsumptionSystemInput): ConsumptionSystem {
+  if (!Array.isArray(input.cohort.needs)) throw new TypeError('cohort needs must be an array');
+  const commodities = new Set<Commodity>();
+  for (const need of input.cohort.needs) {
+    if (!(COMMODITIES as readonly string[]).includes(need.commodity)) {
+      throw new RangeError(`unknown commodity: ${need.commodity}`);
+    }
+    if (
+      typeof need.quantity !== 'number' ||
+      !Number.isFinite(need.quantity) ||
+      !Number.isInteger(need.quantity)
+    ) {
+      throw new TypeError('need quantity must be a finite integer');
+    }
+    if (need.quantity <= 0 || !Number.isSafeInteger(need.quantity)) {
+      throw new RangeError('need quantity must be a positive safe integer');
+    }
+    if (commodities.has(need.commodity)) {
+      throw new RangeError(`duplicate need commodity: ${need.commodity}`);
+    }
+    commodities.add(need.commodity);
+  }
   const initialState = input.initialState;
   if (initialState !== undefined) {
     if (
@@ -115,16 +137,31 @@ export function createConsumptionSystem(input: ConsumptionSystemInput): Consumpt
       return quantity === undefined ? [] : [{ commodity: need.commodity, quantity }];
     });
 
-    for (const trade of trades) {
-      input.market.trade({
-        cityId: input.cohort.cityId,
-        buyerId: input.buyer.ownerId,
-        sellerId: trade.sellerId,
-        commodity: trade.commodity,
-        quantity: trade.quantity,
-        unitPrice: trade.unitPrice,
-      });
-      input.inventory.consume(input.buyer.ownerId, trade.commodity, trade.quantity);
+    const atomicMarket = getTransactionParticipant(input.market)?.market;
+    if (atomicMarket?.isCurrent()) {
+      const commit = atomicMarket.prepareConsumption(
+        trades.map((trade) => ({ buyerId: input.buyer.ownerId, ...trade })),
+        input.buyer.ownerId,
+        input.buyer.accountId,
+        input.cohort.cityId,
+        input.inventory,
+        input.money,
+      );
+      commit();
+    } else {
+      // Custom markets retain their historical per-trade behavior; arbitrary external side effects
+      // cannot be preflighted or rolled back by this consumption system.
+      for (const trade of trades) {
+        input.market.trade({
+          cityId: input.cohort.cityId,
+          buyerId: input.buyer.ownerId,
+          sellerId: trade.sellerId,
+          commodity: trade.commodity,
+          quantity: trade.quantity,
+          unitPrice: trade.unitPrice,
+        });
+        input.inventory.consume(input.buyer.ownerId, trade.commodity, trade.quantity);
+      }
     }
     unmetNeeds = remaining;
     cumulativeUnmetNeeds = nextCumulative;
