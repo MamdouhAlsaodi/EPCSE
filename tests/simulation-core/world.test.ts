@@ -73,6 +73,36 @@ describe('advancing ticks', () => {
     expect(a.getState()).toEqual({ worldId: 'shared-id', tick: 2 });
     expect(b.getState()).toEqual({ worldId: 'shared-id', tick: 0 });
   });
+
+  it('runs registered tick systems in registration order on every tick', () => {
+    const world = createWorld('w');
+    const calls: string[] = [];
+    world.registerTickSystem('first', ({ tick }) => calls.push(`first:${tick}`));
+    world.registerTickSystem('second', ({ tick }) => calls.push(`second:${tick}`));
+
+    world.run(2);
+
+    expect(calls).toEqual(['first:1', 'second:1', 'first:2', 'second:2']);
+    expect(world.getState()).toEqual({ worldId: 'w', tick: 2 });
+  });
+
+  it('starts systems registered during a tick on the next tick', () => {
+    const world = createWorld('w');
+    const calls: string[] = [];
+    world.registerTickSystem('register-later', ({ tick }) => {
+      calls.push(`register:${tick}`);
+      if (tick === 1) {
+        world.registerTickSystem('later', ({ tick: laterTick }) =>
+          calls.push(`later:${laterTick}`),
+        );
+      }
+    });
+
+    world.step();
+    expect(calls).toEqual(['register:1']);
+    world.step();
+    expect(calls).toEqual(['register:1', 'register:2', 'later:2']);
+  });
 });
 
 describe('tick count validation', () => {
