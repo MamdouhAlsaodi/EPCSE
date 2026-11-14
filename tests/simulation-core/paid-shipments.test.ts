@@ -57,6 +57,48 @@ describe('paid shipments', () => {
     expect(money.getState()).toEqual(settled);
   });
 
+  it('keeps the paid fee when a blocked paid shipment is returned', () => {
+    const { inventory, money, network, coordinator } = makeShipmentSystem();
+    coordinator.depart({
+      shipment: { shipmentId: 'blocked-return', routeId: 'road', commodity: 'grain', quantity: 2 },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 10,
+    });
+    const settled = money.getState();
+    network.advanceTick();
+    network.blockRoute('road');
+    network.returnBlockedShipment('blocked-return');
+    network.releaseBlock('road');
+    network.advanceTick();
+    expect(network.getState().shipments[0]?.status).toBe('returned');
+    expect(inventory.getState().balances).toEqual([
+      { ownerId: 'north', commodity: 'grain', quantity: 5 },
+    ]);
+    expect(money.getState()).toEqual(settled);
+  });
+
+  it('rejects paid departures on a blocked route without settling money or moving goods', () => {
+    const { inventory, money, network, coordinator } = makeShipmentSystem();
+    network.blockRoute('road');
+    const before = {
+      inventory: inventory.getState(),
+      money: money.getState(),
+      network: network.getState(),
+    };
+    expect(() =>
+      coordinator.depart({
+        shipment: { shipmentId: 'blocked-load', routeId: 'road', commodity: 'grain', quantity: 1 },
+        buyerAccountId: 'buyer-cash',
+        sellerAccountId: 'seller-cash',
+        payment: 10,
+      }),
+    ).toThrow(/block/i);
+    expect(inventory.getState()).toEqual(before.inventory);
+    expect(money.getState()).toEqual(before.money);
+    expect(network.getState()).toEqual(before.network);
+  });
+
   it('rejects paid departures on a closed route without settling money or moving goods', () => {
     const { inventory, money, network, coordinator } = makeShipmentSystem();
     network.closeRoute('road');

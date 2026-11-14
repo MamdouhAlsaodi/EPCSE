@@ -38,7 +38,11 @@ export interface Shipment extends ShipmentInput {
   readonly status: 'in-transit' | 'arrived' | 'returning' | 'returned';
   /** Active travel ticks remaining while its route is closed. */
   readonly pausedRemainingTicks?: number;
+  readonly blockedAtTick?: number;
   readonly attackTick?: number;
+  /** Tick at which a non-attack obstruction return was selected. */
+  readonly blockReturnTick?: number;
+  readonly blockReturnElapsedTicks?: number;
   readonly returnDueTick?: number;
 }
 
@@ -49,6 +53,8 @@ export interface RouteNetworkSnapshot {
   /** Omitted in legacy snapshots; routes are then considered open. */
   readonly closedRouteIds?: readonly string[];
   readonly attackedRouteIds?: readonly string[];
+  /** Omitted in legacy snapshots; routes are then considered unobstructed. */
+  readonly blockedRouteIds?: readonly string[];
 }
 
 export interface RouteNetwork {
@@ -58,6 +64,14 @@ export interface RouteNetwork {
   closeRoute(routeId: string): RouteNetworkSnapshot;
   /** Reopen immediately at the current tick; paused journeys resume from then. */
   openRoute(routeId: string): RouteNetworkSnapshot;
+  /** Hold outbound journeys and prevent new departures until released or individually returned. */
+  blockRoute(routeId: string): RouteNetworkSnapshot;
+  releaseBlock(routeId: string): RouteNetworkSnapshot;
+  /**
+   * Returns one outbound shipment from a blocked route. Built-in Inventory preflights
+   * zero-elapsed returns atomically; custom Inventory may partially transfer on failure.
+   */
+  returnBlockedShipment(shipmentId: string): RouteNetworkSnapshot;
   /**
    * Turns active outbound shipments homeward. Built-in Inventory batches immediate
    * zero-elapsed returns atomically; custom Inventory may partially transfer cargo
@@ -137,6 +151,15 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     throw new RangeError('invalid attacked route list');
   const attackedRouteIds = initialState?.attackedRouteIds ?? [];
   const attackedRoutes = new Set(attackedRouteIds);
+  if (initialState?.blockedRouteIds !== undefined && !Array.isArray(initialState.blockedRouteIds))
+    throw new RangeError('invalid blocked route list');
+  const blockedRouteIds = initialState?.blockedRouteIds ?? [];
+  const blockedRoutes = new Set(blockedRouteIds);
+  if (
+    blockedRoutes.size !== blockedRouteIds.length ||
+    [...blockedRoutes].some((id) => !routes.has(id) || attackedRoutes.has(id))
+  )
+    throw new RangeError('invalid blocked route list');
   if (
     attackedRoutes.size !== attackedRouteIds.length ||
     [...attackedRoutes].some((id) => !routes.has(id))
@@ -145,7 +168,9 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
   const closedRoutes = new Set(closedRouteIds);
   if (
     closedRoutes.size !== closedRouteIds.length ||
-    [...closedRoutes].some((id) => !routes.has(id) || attackedRoutes.has(id))
+    [...closedRoutes].some(
+      (id) => !routes.has(id) || attackedRoutes.has(id) || blockedRoutes.has(id),
+    )
   )
     throw new RangeError('invalid closed route list');
   if (!Number.isSafeInteger(tick) || tick < 0) throw new RangeError('invalid initial route tick');
@@ -188,15 +213,33 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       shipment.departureTick > tick ||
       (shipment.status === 'returning' || shipment.status === 'returned'
         ? (() => {
-            const elapsed = route.travelTicks - (shipment.arrivalTick - shipment.attackTick!);
-            const expectedDue = shipment.attackTick! + elapsed;
+            const returnTick = shipment.attackTick ?? shipment.blockReturnTick;
+            const elapsed =
+              shipment.attackTick !== undefined
+                ? route.travelTicks - (shipment.arrivalTick - returnTick!)
+                : shipment.blockReturnElapsedTicks;
+            const expectedDue = returnTick! + elapsed!;
             return (
-              !Number.isSafeInteger(shipment.attackTick) ||
-              shipment.attackTick! < shipment.departureTick ||
-              shipment.attackTick! > tick ||
+              (shipment.attackTick === undefined) === (shipment.blockReturnTick === undefined) ||
+              (shipment.attackTick !== undefined &&
+                (shipment.blockReturnElapsedTicks !== undefined ||
+                  shipment.blockedAtTick !== undefined)) ||
+              (shipment.blockReturnTick !== undefined &&
+                (!Number.isSafeInteger(shipment.blockReturnElapsedTicks) ||
+                  !Number.isSafeInteger(shipment.blockedAtTick) ||
+                  shipment.blockedAtTick! < shipment.departureTick ||
+                  shipment.blockedAtTick! > shipment.blockReturnTick! ||
+                  elapsed !==
+                    route.travelTicks - (shipment.arrivalTick - shipment.blockedAtTick!))) ||
+              !Number.isSafeInteger(returnTick) ||
+              returnTick! < shipment.departureTick ||
+              returnTick! > tick ||
               !Number.isSafeInteger(elapsed) ||
-              elapsed < 0 ||
-              elapsed > route.travelTicks ||
+              elapsed! < 0 ||
+              elapsed! > route.travelTicks ||
+              (shipment.blockReturnTick !== undefined &&
+                (elapsed! > Number.MAX_SAFE_INTEGER - returnTick! ||
+                  elapsed! > shipment.blockReturnTick! - shipment.departureTick)) ||
               !Number.isSafeInteger(expectedDue) ||
               !Number.isSafeInteger(shipment.returnDueTick) ||
               shipment.returnDueTick !== expectedDue ||
@@ -208,25 +251,46 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
           })()
         : shipment.status === 'in-transit'
           ? shipment.attackTick !== undefined ||
+            (shipment.blockedAtTick !== undefined && !blockedRoutes.has(shipment.routeId)) ||
+            shipment.blockReturnTick !== undefined ||
+            shipment.blockReturnElapsedTicks !== undefined ||
             shipment.returnDueTick !== undefined ||
             attackedRoutes.has(shipment.routeId) ||
-            (closedRoutes.has(shipment.routeId)
+            (closedRoutes.has(shipment.routeId) || blockedRoutes.has(shipment.routeId)
               ? !Number.isSafeInteger(shipment.pausedRemainingTicks) ||
                 shipment.pausedRemainingTicks! <= 0 ||
                 shipment.pausedRemainingTicks! > route.travelTicks ||
                 shipment.arrivalTick - shipment.pausedRemainingTicks! < shipment.departureTick ||
-                shipment.arrivalTick - shipment.pausedRemainingTicks! > tick
-              : shipment.pausedRemainingTicks !== undefined || shipment.arrivalTick <= tick)
+                shipment.arrivalTick - shipment.pausedRemainingTicks! > tick ||
+                (blockedRoutes.has(shipment.routeId)
+                  ? !Number.isSafeInteger(shipment.blockedAtTick) ||
+                    shipment.blockedAtTick !== shipment.arrivalTick - shipment.pausedRemainingTicks!
+                  : shipment.blockedAtTick !== undefined)
+              : shipment.pausedRemainingTicks !== undefined ||
+                shipment.blockedAtTick !== undefined ||
+                shipment.arrivalTick <= tick)
           : shipment.arrivalTick > tick ||
             shipment.pausedRemainingTicks !== undefined ||
+            shipment.blockedAtTick !== undefined ||
             shipment.attackTick !== undefined ||
+            shipment.blockReturnTick !== undefined ||
+            shipment.blockReturnElapsedTicks !== undefined ||
             shipment.returnDueTick !== undefined)
     )
       throw new RangeError('invalid initial shipment state');
   }
   const transitTotals = new Map<string, number>();
+  const routeCapacityTotals = new Map<string, number>();
   for (const shipment of shipments)
     if (shipment.status === 'in-transit' || shipment.status === 'returning') {
+      const routeTotal = (routeCapacityTotals.get(shipment.routeId) ?? 0) + shipment.quantity;
+      const routeCapacity = routes.get(shipment.routeId)!.capacity;
+      if (
+        !Number.isSafeInteger(routeTotal) ||
+        (routeCapacity !== undefined && routeTotal > routeCapacity)
+      )
+        throw new RangeError('invalid initial route capacity total');
+      routeCapacityTotals.set(shipment.routeId, routeTotal);
       const key = shipment.commodity;
       const total = (transitTotals.get(key) ?? 0) + shipment.quantity;
       if (!Number.isSafeInteger(total)) throw new RangeError('invalid initial transit total');
@@ -255,6 +319,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     shipments: shipments.map((shipment) => ({ ...shipment })),
     closedRouteIds: [...closedRoutes],
     attackedRouteIds: [...attackedRoutes],
+    blockedRouteIds: [...blockedRoutes],
   });
 
   const prepareDeparture = (shipment: ShipmentInput): (() => void) => {
@@ -265,6 +330,8 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     const route = routes.get(shipment.routeId);
     if (!route) throw new RangeError(`unknown route: ${shipment.routeId}`);
     if (closedRoutes.has(route.routeId)) throw new RangeError(`route is closed: ${route.routeId}`);
+    if (blockedRoutes.has(route.routeId))
+      throw new RangeError(`route is blocked: ${route.routeId}`);
     if (attackedRoutes.has(route.routeId))
       throw new RangeError(`route is under attack: ${route.routeId}`);
     if (!Number.isSafeInteger(shipment.quantity) || shipment.quantity <= 0) {
@@ -305,6 +372,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     closeRoute: (routeId) => {
       if (!routes.has(routeId)) throw new RangeError(`unknown route: ${routeId}`);
       if (attackedRoutes.has(routeId)) throw new RangeError(`route is under attack: ${routeId}`);
+      if (blockedRoutes.has(routeId)) throw new RangeError(`route is blocked: ${routeId}`);
       if (!closedRoutes.has(routeId)) {
         shipments = shipments.map((shipment) =>
           shipment.routeId === routeId && shipment.status === 'in-transit'
@@ -318,7 +386,8 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     attackRoute: (routeId) => {
       const route = routes.get(routeId);
       if (!route) throw new RangeError(`unknown route: ${routeId}`);
-      if (closedRoutes.has(routeId)) throw new RangeError(`route is closed: ${routeId}`);
+      if (closedRoutes.has(routeId) || blockedRoutes.has(routeId))
+        throw new RangeError(`route is closed or blocked: ${routeId}`);
       if (attackedRoutes.has(routeId)) return snapshot();
       const outbound = shipments.filter((s) => s.routeId === routeId && s.status === 'in-transit');
       for (const shipment of outbound) {
@@ -376,6 +445,100 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       attackedRoutes.delete(routeId);
       return snapshot();
     },
+    blockRoute: (routeId) => {
+      if (!routes.has(routeId)) throw new RangeError(`unknown route: ${routeId}`);
+      if (closedRoutes.has(routeId) || attackedRoutes.has(routeId))
+        throw new RangeError(`route is closed or under attack: ${routeId}`);
+      if (!blockedRoutes.has(routeId)) {
+        shipments = shipments.map((shipment) =>
+          shipment.routeId === routeId && shipment.status === 'in-transit'
+            ? {
+                ...shipment,
+                pausedRemainingTicks: shipment.arrivalTick - tick,
+                blockedAtTick: tick,
+              }
+            : shipment,
+        );
+        blockedRoutes.add(routeId);
+      }
+      return snapshot();
+    },
+    releaseBlock: (routeId) => {
+      if (!routes.has(routeId)) throw new RangeError(`unknown route: ${routeId}`);
+      if (blockedRoutes.has(routeId)) {
+        for (const shipment of shipments) {
+          if (
+            shipment.routeId === routeId &&
+            shipment.status === 'in-transit' &&
+            shipment.pausedRemainingTicks! > Number.MAX_SAFE_INTEGER - tick
+          )
+            throw new RangeError('arrival tick would exceed Number.MAX_SAFE_INTEGER');
+        }
+        shipments = shipments.map((shipment) => {
+          if (shipment.routeId !== routeId || shipment.status !== 'in-transit') return shipment;
+          const active = { ...shipment };
+          delete active.pausedRemainingTicks;
+          delete active.blockedAtTick;
+          return { ...active, arrivalTick: tick + shipment.pausedRemainingTicks! };
+        });
+        blockedRoutes.delete(routeId);
+      }
+      return snapshot();
+    },
+    returnBlockedShipment: (shipmentId) => {
+      const shipment = shipments.find(({ shipmentId: id }) => id === shipmentId);
+      if (!shipment || shipment.status !== 'in-transit' || !blockedRoutes.has(shipment.routeId))
+        throw new RangeError(`shipment is not outbound on a blocked route: ${shipmentId}`);
+      const route = routes.get(shipment.routeId)!;
+      const remaining = shipment.pausedRemainingTicks!;
+      const elapsed = route.travelTicks - remaining;
+      if (
+        !Number.isSafeInteger(elapsed) ||
+        elapsed < 0 ||
+        elapsed > route.travelTicks ||
+        elapsed > Number.MAX_SAFE_INTEGER - tick
+      )
+        throw new RangeError('return due tick would exceed Number.MAX_SAFE_INTEGER');
+      const due = tick + elapsed;
+      const immediateReturn = elapsed === 0;
+      if (immediateReturn) {
+        const balances = new Map(
+          input.inventory
+            .getState()
+            .balances.map((b) => [`${b.ownerId}\\0${b.commodity}`, b.quantity]),
+        );
+        const key = `${route.sourceCityId}\\0${shipment.commodity}`;
+        if (shipment.quantity > Number.MAX_SAFE_INTEGER - (balances.get(key) ?? 0))
+          throw new RangeError('source inventory would exceed Number.MAX_SAFE_INTEGER');
+        const transfer = {
+          fromOwnerId: transitOwnerId,
+          toOwnerId: route.sourceCityId,
+          commodity: shipment.commodity,
+          quantity: shipment.quantity,
+        };
+        if (inventoryParticipant) inventoryParticipant.prepareTransfers([transfer])();
+        else
+          input.inventory.transfer(
+            transfer.fromOwnerId,
+            transfer.toOwnerId,
+            transfer.commodity,
+            transfer.quantity,
+          );
+      }
+      shipments = shipments.map((active) => {
+        if (active.shipmentId !== shipmentId) return active;
+        const unpaused = { ...active };
+        delete unpaused.pausedRemainingTicks;
+        return {
+          ...unpaused,
+          status: immediateReturn ? 'returned' : 'returning',
+          blockReturnTick: tick,
+          blockReturnElapsedTicks: elapsed,
+          returnDueTick: due,
+        };
+      });
+      return snapshot();
+    },
     openRoute: (routeId) => {
       if (!routes.has(routeId)) throw new RangeError(`unknown route: ${routeId}`);
       if (closedRoutes.has(routeId)) {
@@ -426,6 +589,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
           ? returnDueTick! <= nextTick
           : status === 'in-transit' &&
             !closedRoutes.has(routeId) &&
+            !blockedRoutes.has(routeId) &&
             !attackedRoutes.has(routeId) &&
             arrivalTick <= nextTick,
       );
