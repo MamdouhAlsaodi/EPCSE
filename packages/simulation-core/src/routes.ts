@@ -6,6 +6,11 @@ export interface RouteInput {
   readonly sourceCityId: string;
   readonly destinationCityId: string;
   readonly travelTicks: number;
+  /**
+   * Provisional capacity in shared abstract slots: each unit uses one slot regardless
+   * of commodity. This is not a measure of physical weight or volume.
+   */
+  readonly capacity?: number;
 }
 
 export interface RouteNetworkInput {
@@ -80,6 +85,12 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     if (!Number.isSafeInteger(route.travelTicks) || route.travelTicks <= 0) {
       throw new RangeError('travel ticks must be a positive safe integer');
     }
+    if (
+      route.capacity !== undefined &&
+      (!Number.isSafeInteger(route.capacity) || route.capacity <= 0)
+    ) {
+      throw new RangeError('route capacity must be a positive safe integer');
+    }
     routes.set(route.routeId, { ...route });
   }
   const shipments: Shipment[] = [];
@@ -104,6 +115,20 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       }
       if (route.travelTicks > Number.MAX_SAFE_INTEGER - tick) {
         throw new RangeError('arrival tick would exceed Number.MAX_SAFE_INTEGER');
+      }
+      if (route.capacity !== undefined) {
+        let inTransit = 0;
+        for (const active of shipments) {
+          if (active.routeId === route.routeId && active.status === 'in-transit') {
+            if (active.quantity > route.capacity - inTransit) {
+              throw new RangeError(`route capacity exceeded: ${route.routeId}`);
+            }
+            inTransit += active.quantity;
+          }
+        }
+        if (shipment.quantity > route.capacity - inTransit) {
+          throw new RangeError(`route capacity exceeded: ${route.routeId}`);
+        }
       }
       input.inventory.transfer(
         route.sourceCityId,
