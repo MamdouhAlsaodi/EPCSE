@@ -36,17 +36,25 @@ export interface Shipment extends ShipmentInput {
   readonly departureTick: number;
   readonly arrivalTick: number;
   readonly status: 'in-transit' | 'arrived';
+  /** Active travel ticks remaining while its route is closed. */
+  readonly pausedRemainingTicks?: number;
 }
 
 export interface RouteNetworkSnapshot {
   readonly tick: number;
   readonly routes: readonly RouteInput[];
   readonly shipments: readonly Shipment[];
+  /** Omitted in legacy snapshots; routes are then considered open. */
+  readonly closedRouteIds?: readonly string[];
 }
 
 export interface RouteNetwork {
   getState(): RouteNetworkSnapshot;
   depart(shipment: ShipmentInput): RouteNetworkSnapshot;
+  /** Close immediately at the current tick; active journeys retain their remaining travel ticks. */
+  closeRoute(routeId: string): RouteNetworkSnapshot;
+  /** Reopen immediately at the current tick; paused journeys resume from then. */
+  openRoute(routeId: string): RouteNetworkSnapshot;
   /**
    * Moves from t to t+1 before delivering shipments due at t+1. Built-in Inventory
    * batches due deliveries atomically. Custom Inventory deliveries are transferred
@@ -112,6 +120,15 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     throw new RangeError('invalid initial route state');
   let tick = initialState?.tick ?? 0;
   let shipments: Shipment[] = initialState?.shipments.map((shipment) => ({ ...shipment })) ?? [];
+  if (initialState?.closedRouteIds !== undefined && !Array.isArray(initialState.closedRouteIds))
+    throw new RangeError('invalid closed route list');
+  const closedRouteIds = initialState?.closedRouteIds ?? [];
+  const closedRoutes = new Set(closedRouteIds);
+  if (
+    closedRoutes.size !== closedRouteIds.length ||
+    [...closedRoutes].some((id) => !routes.has(id))
+  )
+    throw new RangeError('invalid closed route list');
   if (!Number.isSafeInteger(tick) || tick < 0) throw new RangeError('invalid initial route tick');
   if (
     initialState &&
@@ -148,11 +165,17 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       shipment.departureTick < 0 ||
       !Number.isSafeInteger(shipment.arrivalTick) ||
       shipment.arrivalTick <= shipment.departureTick ||
-      shipment.arrivalTick !== shipment.departureTick + route.travelTicks ||
+      shipment.arrivalTick < shipment.departureTick + route.travelTicks ||
       shipment.departureTick > tick ||
       (shipment.status === 'in-transit'
-        ? shipment.arrivalTick <= tick
-        : shipment.arrivalTick > tick)
+        ? closedRoutes.has(shipment.routeId)
+          ? !Number.isSafeInteger(shipment.pausedRemainingTicks) ||
+            shipment.pausedRemainingTicks! <= 0 ||
+            shipment.pausedRemainingTicks! > route.travelTicks ||
+            shipment.arrivalTick - shipment.pausedRemainingTicks! < shipment.departureTick ||
+            shipment.arrivalTick - shipment.pausedRemainingTicks! > tick
+          : shipment.pausedRemainingTicks !== undefined || shipment.arrivalTick <= tick
+        : shipment.arrivalTick > tick || shipment.pausedRemainingTicks !== undefined)
     )
       throw new RangeError('invalid initial shipment state');
   }
@@ -185,6 +208,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     tick,
     routes: [...routes.values()].map((route) => ({ ...route })),
     shipments: shipments.map((shipment) => ({ ...shipment })),
+    closedRouteIds: [...closedRoutes],
   });
 
   const prepareDeparture = (shipment: ShipmentInput): (() => void) => {
@@ -194,6 +218,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     }
     const route = routes.get(shipment.routeId);
     if (!route) throw new RangeError(`unknown route: ${shipment.routeId}`);
+    if (closedRoutes.has(route.routeId)) throw new RangeError(`route is closed: ${route.routeId}`);
     if (!Number.isSafeInteger(shipment.quantity) || shipment.quantity <= 0) {
       throw new RangeError('shipment quantity must be a positive safe integer');
     }
@@ -226,6 +251,38 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
 
   const api: RouteNetwork = {
     getState: snapshot,
+    closeRoute: (routeId) => {
+      if (!routes.has(routeId)) throw new RangeError(`unknown route: ${routeId}`);
+      if (!closedRoutes.has(routeId)) {
+        shipments = shipments.map((shipment) =>
+          shipment.routeId === routeId && shipment.status === 'in-transit'
+            ? { ...shipment, pausedRemainingTicks: shipment.arrivalTick - tick }
+            : shipment,
+        );
+        closedRoutes.add(routeId);
+      }
+      return snapshot();
+    },
+    openRoute: (routeId) => {
+      if (!routes.has(routeId)) throw new RangeError(`unknown route: ${routeId}`);
+      if (closedRoutes.has(routeId)) {
+        for (const shipment of shipments) {
+          if (
+            shipment.routeId === routeId &&
+            shipment.status === 'in-transit' &&
+            shipment.pausedRemainingTicks! > Number.MAX_SAFE_INTEGER - tick
+          )
+            throw new RangeError('arrival tick would exceed Number.MAX_SAFE_INTEGER');
+        }
+        shipments = shipments.map((shipment) => {
+          if (shipment.routeId !== routeId || shipment.status !== 'in-transit') return shipment;
+          const { pausedRemainingTicks, ...active } = shipment;
+          return { ...active, arrivalTick: tick + pausedRemainingTicks! };
+        });
+        closedRoutes.delete(routeId);
+      }
+      return snapshot();
+    },
     depart: (shipment) => {
       const prepareNetwork = prepareDeparture(shipment);
       const route = routes.get(shipment.routeId)!;
@@ -252,7 +309,8 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
         throw new RangeError('tick would exceed Number.MAX_SAFE_INTEGER');
       const nextTick = tick + 1;
       const due = shipments.filter(
-        ({ status, arrivalTick }) => status === 'in-transit' && arrivalTick <= nextTick,
+        ({ status, arrivalTick, routeId }) =>
+          status === 'in-transit' && !closedRoutes.has(routeId) && arrivalTick <= nextTick,
       );
       const balances = new Map<string, number>();
       for (const { ownerId, commodity, quantity } of input.inventory.getState().balances) {
