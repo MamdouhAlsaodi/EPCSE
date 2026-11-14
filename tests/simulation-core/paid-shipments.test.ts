@@ -28,6 +28,35 @@ const makeShipmentSystem = () => {
 };
 
 describe('paid shipments', () => {
+  it('keeps the settled fee when an attacked paid shipment returns to its source', () => {
+    const { inventory, money, network, coordinator } = makeShipmentSystem();
+    coordinator.depart({
+      shipment: { shipmentId: 'paid-return', routeId: 'road', commodity: 'grain', quantity: 2 },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 10,
+    });
+    const settled = money.getState();
+    network.advanceTick();
+    network.attackRoute('road');
+    expect(network.getState().shipments[0]?.status).toBe('returning');
+    expect(() =>
+      coordinator.depart({
+        shipment: { shipmentId: 'blocked', routeId: 'road', commodity: 'grain', quantity: 1 },
+        buyerAccountId: 'buyer-cash',
+        sellerAccountId: 'seller-cash',
+        payment: 5,
+      }),
+    ).toThrow(/attack/i);
+    expect(money.getState()).toEqual(settled);
+    network.advanceTick();
+    expect(network.getState().shipments[0]?.status).toBe('returned');
+    expect(inventory.getState().balances).toEqual([
+      { ownerId: 'north', commodity: 'grain', quantity: 5 },
+    ]);
+    expect(money.getState()).toEqual(settled);
+  });
+
   it('rejects paid departures on a closed route without settling money or moving goods', () => {
     const { inventory, money, network, coordinator } = makeShipmentSystem();
     network.closeRoute('road');
