@@ -6,3 +6,8 @@ export const engineStatus = { implemented: false } as const;
 
 export * from './world.js';
 export * from './domain.js';
+export * from './commodity.js';
+export * from './inventory.js';
+export * from './money.js';
+export * from './city-market.js';
+export * from './population.js';
