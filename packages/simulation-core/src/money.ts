@@ -1,3 +1,5 @@
+import { registerTransactionParticipant } from './transaction-internal.js';
+
 /** Provisional integer accounting only; this does not claim a fiat scale or real-world currency. */
 export interface MoneyBalanceInput {
   readonly accountId: string;
@@ -21,7 +23,7 @@ export interface MoneyLedger {
 export function createMoneyLedger(input: MoneyLedgerInput): MoneyLedger {
   const accounts = [...input.accounts];
   const accountIds = new Set<string>();
-  const balances = new Map<string, number>();
+  let balances = new Map<string, number>();
   const validateAccountId = (accountId: string): void => {
     if (typeof accountId !== 'string') throw new TypeError('account id must be a string');
     if (accountId.length === 0) throw new RangeError('account id must be nonempty');
@@ -57,7 +59,7 @@ export function createMoneyLedger(input: MoneyLedgerInput): MoneyLedger {
   const snapshot = (): MoneySnapshot => ({
     balances: accounts.map((accountId) => ({ accountId, amount: balances.get(accountId)! })),
   });
-  return {
+  const api: MoneyLedger = {
     getState: snapshot,
     transfer: (fromAccountId, toAccountId, amount) => {
       if (!accountIds.has(fromAccountId)) {
@@ -84,4 +86,36 @@ export function createMoneyLedger(input: MoneyLedgerInput): MoneyLedger {
       return snapshot();
     },
   };
+  registerTransactionParticipant(api, {
+    money: {
+      prepareTransfer: (fromAccountId, toAccountId, amount) => {
+        if (!accountIds.has(fromAccountId)) {
+          throw new RangeError(`unknown source account: ${fromAccountId}`);
+        }
+        if (!accountIds.has(toAccountId)) {
+          throw new RangeError(`unknown destination account: ${toAccountId}`);
+        }
+        if (typeof amount !== 'number' || !Number.isFinite(amount) || !Number.isInteger(amount)) {
+          throw new TypeError('transfer amount must be a finite integer');
+        }
+        if (amount <= 0 || !Number.isSafeInteger(amount)) {
+          throw new RangeError('transfer amount must be a positive safe integer');
+        }
+        const source = balances.get(fromAccountId)!;
+        const destination = balances.get(toAccountId)!;
+        if (source < amount) throw new RangeError('insufficient funds');
+        if (amount > Number.MAX_SAFE_INTEGER - destination) {
+          throw new RangeError('destination balance would exceed Number.MAX_SAFE_INTEGER');
+        }
+        if (fromAccountId === toAccountId) return () => {};
+        const stagedBalances = new Map(balances);
+        stagedBalances.set(fromAccountId, source - amount);
+        stagedBalances.set(toAccountId, destination + amount);
+        return () => {
+          balances = stagedBalances;
+        };
+      },
+    },
+  });
+  return api;
 }

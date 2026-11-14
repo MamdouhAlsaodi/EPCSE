@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createInventory, createRouteNetwork } from '@epcse/simulation-core';
+import { createInventory, createRouteNetwork } from '../../packages/simulation-core/src/index.js';
 
 describe('route shipments', () => {
   it('requires every city and the transit custodian to be inventory owners', () => {
@@ -47,6 +47,38 @@ describe('route shipments', () => {
     expect(() => network.advanceTick()).toThrow(/exceed/);
     expect(inventory.getState()).toEqual(beforeInventory);
     expect(network.getState()).toEqual(beforeNetwork);
+  });
+
+  it('delivers all due shipments atomically without calling replaceable transfer', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 4 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 1 },
+      ],
+    });
+    network.depart({ shipmentId: 'load-1', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.depart({ shipmentId: 'load-2', routeId: 'road', commodity: 'grain', quantity: 1 });
+    inventory.transfer = () => {
+      throw new Error('patched transfer must not run during delivery');
+    };
+
+    expect(network.advanceTick()).toMatchObject({
+      tick: 1,
+      shipments: [
+        { shipmentId: 'load-1', status: 'arrived' },
+        { shipmentId: 'load-2', status: 'arrived' },
+      ],
+    });
+    expect(inventory.getState().balances).toEqual([
+      { ownerId: 'north', commodity: 'grain', quantity: 2 },
+      { ownerId: 'south', commodity: 'grain', quantity: 2 },
+    ]);
   });
 
   it('returns defensive route and shipment snapshots', () => {
@@ -113,6 +145,75 @@ describe('route shipments', () => {
     ]) {
       expect(() => createRouteNetwork({ ...base, routes: [route] })).toThrow();
     }
+  });
+
+  it('supports a wrapped custom inventory for ordinary single-shipment routes', () => {
+    const backing = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 2 }],
+    });
+    const inventory = {
+      hasOwner: backing.hasOwner.bind(backing),
+      getState: backing.getState.bind(backing),
+      transfer: backing.transfer.bind(backing),
+      consume: backing.consume.bind(backing),
+      produce: backing.produce.bind(backing),
+    };
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 1 },
+      ],
+    });
+
+    network.depart({ shipmentId: 'custom-1', routeId: 'road', commodity: 'grain', quantity: 1 });
+    expect(backing.getState().balances).toEqual([
+      { ownerId: 'north', commodity: 'grain', quantity: 1 },
+      { ownerId: 'transit', commodity: 'grain', quantity: 1 },
+    ]);
+    expect(network.advanceTick()).toMatchObject({ tick: 1, shipments: [{ status: 'arrived' }] });
+    expect(backing.getState().balances).toEqual([
+      { ownerId: 'north', commodity: 'grain', quantity: 1 },
+      { ownerId: 'south', commodity: 'grain', quantity: 1 },
+    ]);
+  });
+
+  it('rejects multiple due deliveries for custom inventories before any mutation', () => {
+    const backing = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 2 }],
+    });
+    const inventory = {
+      hasOwner: backing.hasOwner.bind(backing),
+      getState: backing.getState.bind(backing),
+      transfer: backing.transfer.bind(backing),
+      consume: backing.consume.bind(backing),
+      produce: backing.produce.bind(backing),
+    };
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 1 },
+      ],
+    });
+    network.depart({ shipmentId: 'custom-1', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.depart({ shipmentId: 'custom-2', routeId: 'road', commodity: 'grain', quantity: 1 });
+    const beforeInventory = backing.getState();
+    const beforeNetwork = network.getState();
+    let transferCalls = 0;
+    inventory.transfer = (...args) => {
+      transferCalls += 1;
+      return backing.transfer(...args);
+    };
+
+    expect(() => network.advanceTick()).toThrow(/multiple.*atomic|atomic.*multiple/i);
+    expect(transferCalls).toBe(0);
+    expect(backing.getState()).toEqual(beforeInventory);
+    expect(network.getState()).toEqual(beforeNetwork);
   });
 
   it('moves goods into transit at departure and delivers them on the due tick', () => {

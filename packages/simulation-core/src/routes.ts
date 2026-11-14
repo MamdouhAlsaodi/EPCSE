@@ -1,5 +1,9 @@
 import type { Commodity } from './commodity.js';
 import type { Inventory } from './inventory.js';
+import {
+  getTransactionParticipant,
+  registerTransactionParticipant,
+} from './transaction-internal.js';
 
 export interface RouteInput {
   readonly routeId: string;
@@ -37,7 +41,11 @@ export interface RouteNetworkSnapshot {
 export interface RouteNetwork {
   getState(): RouteNetworkSnapshot;
   depart(shipment: ShipmentInput): RouteNetworkSnapshot;
-  /** Moves from t to t+1 before delivering shipments due at t+1. */
+  /**
+   * Moves from t to t+1 before delivering shipments due at t+1. Custom Inventory
+   * implementations support single due deliveries only; multiple due deliveries are
+   * rejected because the public Inventory API cannot guarantee an atomic batch.
+   */
   advanceTick(): RouteNetworkSnapshot;
 }
 
@@ -65,6 +73,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
   if (!input.inventory.hasOwner(transitOwnerId)) {
     throw new RangeError(`unknown transit inventory owner: ${transitOwnerId}`);
   }
+  const inventoryParticipant = getTransactionParticipant(input.inventory)?.inventory;
   const routes = new Map<string, RouteInput>();
   for (const route of input.routes ?? []) {
     validateId(route.routeId, 'route id');
@@ -82,7 +91,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     }
     routes.set(route.routeId, { ...route });
   }
-  const shipments: Shipment[] = [];
+  let shipments: Shipment[] = [];
   let tick = 0;
   const snapshot = (): RouteNetworkSnapshot => ({
     tick,
@@ -90,33 +99,50 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     shipments: shipments.map((shipment) => ({ ...shipment })),
   });
 
-  return {
+  const prepareDeparture = (shipment: ShipmentInput): (() => void) => {
+    validateId(shipment.shipmentId, 'shipment id');
+    if (shipments.some(({ shipmentId }) => shipmentId === shipment.shipmentId)) {
+      throw new RangeError(`duplicate shipment id: ${shipment.shipmentId}`);
+    }
+    const route = routes.get(shipment.routeId);
+    if (!route) throw new RangeError(`unknown route: ${shipment.routeId}`);
+    if (!Number.isSafeInteger(shipment.quantity) || shipment.quantity <= 0) {
+      throw new RangeError('shipment quantity must be a positive safe integer');
+    }
+    if (route.travelTicks > Number.MAX_SAFE_INTEGER - tick) {
+      throw new RangeError('arrival tick would exceed Number.MAX_SAFE_INTEGER');
+    }
+    const arrivalTick = tick + route.travelTicks;
+    const stagedShipments = [
+      ...shipments,
+      { ...shipment, departureTick: tick, arrivalTick, status: 'in-transit' as const },
+    ];
+    return () => {
+      shipments = stagedShipments;
+    };
+  };
+
+  const api: RouteNetwork = {
     getState: snapshot,
     depart: (shipment) => {
-      validateId(shipment.shipmentId, 'shipment id');
-      if (shipments.some(({ shipmentId }) => shipmentId === shipment.shipmentId)) {
-        throw new RangeError(`duplicate shipment id: ${shipment.shipmentId}`);
+      const prepareNetwork = prepareDeparture(shipment);
+      const route = routes.get(shipment.routeId)!;
+      if (inventoryParticipant) {
+        inventoryParticipant.prepareTransfer(
+          route.sourceCityId,
+          transitOwnerId,
+          shipment.commodity,
+          shipment.quantity,
+        )();
+      } else {
+        input.inventory.transfer(
+          route.sourceCityId,
+          transitOwnerId,
+          shipment.commodity,
+          shipment.quantity,
+        );
       }
-      const route = routes.get(shipment.routeId);
-      if (!route) throw new RangeError(`unknown route: ${shipment.routeId}`);
-      if (!Number.isSafeInteger(shipment.quantity) || shipment.quantity <= 0) {
-        throw new RangeError('shipment quantity must be a positive safe integer');
-      }
-      if (route.travelTicks > Number.MAX_SAFE_INTEGER - tick) {
-        throw new RangeError('arrival tick would exceed Number.MAX_SAFE_INTEGER');
-      }
-      input.inventory.transfer(
-        route.sourceCityId,
-        transitOwnerId,
-        shipment.commodity,
-        shipment.quantity,
-      );
-      shipments.push({
-        ...shipment,
-        departureTick: tick,
-        arrivalTick: tick + route.travelTicks,
-        status: 'in-transit',
-      });
+      prepareNetwork();
       return snapshot();
     },
     advanceTick: () => {
@@ -126,6 +152,11 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       const due = shipments.filter(
         ({ status, arrivalTick }) => status === 'in-transit' && arrivalTick <= nextTick,
       );
+      // Foreign Inventory implementations expose only single transfers, so multiple due
+      // deliveries cannot be proven all-or-nothing. Reject them before reading/mutating state.
+      if (!inventoryParticipant && due.length > 1) {
+        throw new TypeError('multiple due shipments require atomic inventory transfers');
+      }
       const balances = new Map<string, number>();
       for (const { ownerId, commodity, quantity } of input.inventory.getState().balances) {
         balances.set(`${ownerId}\0${commodity}`, quantity);
@@ -148,13 +179,21 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
           throw new RangeError('destination inventory would exceed Number.MAX_SAFE_INTEGER');
         }
       }
-      for (const shipment of due) {
-        const route = routes.get(shipment.routeId)!;
+      const transfers = due.map((shipment) => ({
+        fromOwnerId: transitOwnerId,
+        toOwnerId: routes.get(shipment.routeId)!.destinationCityId,
+        commodity: shipment.commodity,
+        quantity: shipment.quantity,
+      }));
+      if (inventoryParticipant) {
+        inventoryParticipant.prepareTransfers(transfers)();
+      } else if (transfers.length === 1) {
+        const transfer = transfers[0]!;
         input.inventory.transfer(
-          transitOwnerId,
-          route.destinationCityId,
-          shipment.commodity,
-          shipment.quantity,
+          transfer.fromOwnerId,
+          transfer.toOwnerId,
+          transfer.commodity,
+          transfer.quantity,
         );
       }
       for (const shipment of due) {
@@ -165,4 +204,17 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       return snapshot();
     },
   };
+  registerTransactionParticipant(api, {
+    network: {
+      inventory: input.inventory,
+      transitOwnerId,
+      getRouteSource: (routeId) => {
+        const route = routes.get(routeId);
+        if (!route) throw new RangeError(`unknown route: ${routeId}`);
+        return route.sourceCityId;
+      },
+      prepareDeparture,
+    },
+  });
+  return api;
 }
