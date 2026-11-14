@@ -1,4 +1,5 @@
 import { COMMODITIES, type Commodity } from './commodity.js';
+import { registerTransactionParticipant } from './transaction-internal.js';
 
 export interface InventoryBalanceInput {
   readonly ownerId: string;
@@ -80,7 +81,7 @@ export interface Inventory {
 
 export function createInventory(input: InventoryInput): Inventory {
   const owners = new Set<string>();
-  const balances = new Map<string, number>();
+  let balances = new Map<string, number>();
   const key = (ownerId: string, commodity: Commodity): string => `${ownerId}\0${commodity}`;
   const validateOwnerId = (ownerId: string): void => {
     if (typeof ownerId !== 'string') throw new TypeError('owner id must be a string');
@@ -124,7 +125,7 @@ export function createInventory(input: InventoryInput): Inventory {
     ),
   });
 
-  return {
+  const api: Inventory = {
     hasOwner: (ownerId) => owners.has(ownerId),
     getState: snapshot,
     transfer: (fromOwnerId, toOwnerId, commodity, quantity) => {
@@ -197,4 +198,44 @@ export function createInventory(input: InventoryInput): Inventory {
       return snapshot();
     },
   };
+  const prepareTransfers = (
+    transfers: readonly {
+      readonly fromOwnerId: string;
+      readonly toOwnerId: string;
+      readonly commodity: Commodity;
+      readonly quantity: number;
+    }[],
+  ): (() => void) => {
+    const stagedBalances = new Map(balances);
+    for (const { fromOwnerId, toOwnerId, commodity, quantity } of transfers) {
+      if (!owners.has(fromOwnerId)) throw new RangeError(`unknown source owner: ${fromOwnerId}`);
+      if (!owners.has(toOwnerId)) throw new RangeError(`unknown destination owner: ${toOwnerId}`);
+      validateCommodity(commodity);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0) {
+        throw new RangeError('transfer quantity must be a positive safe integer');
+      }
+      if (fromOwnerId === toOwnerId) continue;
+      const sourceKey = key(fromOwnerId, commodity);
+      const destinationKey = key(toOwnerId, commodity);
+      const sourceBalance = stagedBalances.get(sourceKey) ?? 0;
+      const destinationBalance = stagedBalances.get(destinationKey) ?? 0;
+      if (sourceBalance < quantity) throw new RangeError('insufficient inventory');
+      if (quantity > Number.MAX_SAFE_INTEGER - destinationBalance) {
+        throw new RangeError('destination inventory would exceed Number.MAX_SAFE_INTEGER');
+      }
+      stagedBalances.set(sourceKey, sourceBalance - quantity);
+      stagedBalances.set(destinationKey, destinationBalance + quantity);
+    }
+    return () => {
+      balances = stagedBalances;
+    };
+  };
+  registerTransactionParticipant(api, {
+    inventory: {
+      prepareTransfers,
+      prepareTransfer: (fromOwnerId, toOwnerId, commodity, quantity) =>
+        prepareTransfers([{ fromOwnerId, toOwnerId, commodity, quantity }]),
+    },
+  });
+  return api;
 }
