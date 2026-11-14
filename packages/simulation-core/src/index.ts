@@ -13,5 +13,6 @@ export * from './money.js';
 export * from './city-market.js';
 export * from './population.js';
 export * from './pricing.js';
+export * from './market-clearing.js';
 export * from './routes.js';
 export * from './production.js';
