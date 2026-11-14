@@ -1,5 +1,5 @@
 import type { CityMarket } from './city-market.js';
-import type { Commodity } from './commodity.js';
+import { COMMODITIES, type Commodity } from './commodity.js';
 import type { Inventory } from './inventory.js';
 import type { MoneyLedger } from './money.js';
 import type { PopulationCohortInput, PopulationNeed } from './population.js';
@@ -14,6 +14,10 @@ export interface ConsumptionSystemInput {
   readonly market: CityMarket;
   readonly inventory: Inventory;
   readonly money: MoneyLedger;
+  readonly initialState?: {
+    readonly unmetNeeds: readonly PopulationNeed[];
+    readonly cumulativeUnmetNeeds: readonly PopulationNeed[];
+  };
 }
 
 export interface ConsumptionSystem {
@@ -23,8 +27,44 @@ export interface ConsumptionSystem {
 }
 
 export function createConsumptionSystem(input: ConsumptionSystemInput): ConsumptionSystem {
-  let unmetNeeds: PopulationNeed[] = input.cohort.needs.map((need) => ({ ...need }));
-  let cumulativeUnmetNeeds: PopulationNeed[] = [];
+  const initialState = input.initialState;
+  if (initialState !== undefined) {
+    if (
+      !initialState ||
+      typeof initialState !== 'object' ||
+      !Array.isArray(initialState.unmetNeeds) ||
+      !Array.isArray(initialState.cumulativeUnmetNeeds)
+    )
+      throw new RangeError('invalid initial consumption state');
+    const configuredNeeds = new Map(
+      input.cohort.needs.map((need) => [need.commodity, need.quantity]),
+    );
+    const validateNeeds = (needs: readonly PopulationNeed[], isUnmet: boolean): void => {
+      const seen = new Set<Commodity>();
+      for (const need of needs) {
+        if (
+          !need ||
+          typeof need !== 'object' ||
+          !COMMODITIES.includes(need.commodity) ||
+          seen.has(need.commodity) ||
+          !Number.isSafeInteger(need.quantity) ||
+          need.quantity <= 0 ||
+          !configuredNeeds.has(need.commodity) ||
+          (isUnmet && need.quantity > configuredNeeds.get(need.commodity)!)
+        )
+          throw new RangeError('invalid initial consumption need');
+        seen.add(need.commodity);
+      }
+    };
+    validateNeeds(initialState.unmetNeeds, true);
+    validateNeeds(initialState.cumulativeUnmetNeeds, false);
+  }
+  let unmetNeeds: PopulationNeed[] = (input.initialState?.unmetNeeds ?? input.cohort.needs).map(
+    (need) => ({ ...need }),
+  );
+  let cumulativeUnmetNeeds: PopulationNeed[] = (input.initialState?.cumulativeUnmetNeeds ?? []).map(
+    (need) => ({ ...need }),
+  );
   input.world.registerTickSystem(`consumption:${input.cohort.cohortId}`, () => {
     const remaining: PopulationNeed[] = [];
     const trades: {

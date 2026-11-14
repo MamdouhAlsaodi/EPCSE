@@ -17,15 +17,33 @@ export function createRecipeProducer(
   inventory: Inventory,
   ownerId: string,
   recipe: ProductionRecipe,
-  options: { readonly maxBatchesPerTick?: number } = {},
+  options: {
+    readonly maxBatchesPerTick?: number;
+    readonly initialState?: RecipeProducerSnapshot;
+  } = {},
 ): RecipeProducer {
   const maxBatchesPerTick = options.maxBatchesPerTick ?? 1;
   if (!Number.isSafeInteger(maxBatchesPerTick) || maxBatchesPerTick <= 0) {
     throw new RangeError('maximum batches per tick must be a positive safe integer');
   }
-  let status: RecipeProducerSnapshot['status'] = 'running';
-  let stoppedReason: RecipeProducerSnapshot['stoppedReason'];
-  let batchesProduced = 0;
+  if (
+    options.initialState &&
+    options.initialState.status !== 'running' &&
+    options.initialState.status !== 'stopped'
+  )
+    throw new RangeError('invalid initial producer state');
+  let status: RecipeProducerSnapshot['status'] = options.initialState?.status ?? 'running';
+  let stoppedReason: RecipeProducerSnapshot['stoppedReason'] = options.initialState?.stoppedReason;
+  let batchesProduced = options.initialState?.batchesProduced ?? 0;
+  if (
+    (status !== 'running' && status !== 'stopped') ||
+    !Number.isSafeInteger(batchesProduced) ||
+    batchesProduced < 0 ||
+    (status === 'running' && stoppedReason !== undefined) ||
+    (status === 'stopped' && stoppedReason !== 'missing-inputs')
+  ) {
+    throw new RangeError('invalid initial producer state');
+  }
 
   world.registerTickSystem(`production:${producerId}`, () => {
     if (status === 'stopped') return;

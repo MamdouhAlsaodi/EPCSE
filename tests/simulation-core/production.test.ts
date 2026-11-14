@@ -173,6 +173,39 @@ describe('recipe-driven production', () => {
     });
   });
 
+  it('rejects invalid initial statuses, stopped reasons, and batch counts', () => {
+    const recipe = {
+      inputs: [{ commodity: 'grain' as const, quantity: 1 }],
+      outputs: [{ commodity: 'tools' as const, quantity: 1 }],
+    };
+    const invalidStates = [
+      { batchesProduced: 0 },
+      { status: 'paused', batchesProduced: 0 },
+      { status: 'stopped', stoppedReason: 'unknown', batchesProduced: 0 },
+      { status: 'running', stoppedReason: 'missing-inputs', batchesProduced: 0 },
+      { status: 'running', batchesProduced: -1 },
+      { status: 'running', batchesProduced: 1.5 },
+      { status: 'running', batchesProduced: Number.MAX_SAFE_INTEGER + 1 },
+    ];
+
+    for (const [index, initialState] of invalidStates.entries()) {
+      let rejected = false;
+      try {
+        createRecipeProducer(
+          createWorld(`invalid-initial-${index}`),
+          `producer-${index}`,
+          createInventory({ owners: ['north'] }),
+          'north',
+          recipe,
+          { initialState: initialState as never },
+        );
+      } catch (error) {
+        rejected = error instanceof RangeError;
+      }
+      expect(rejected, JSON.stringify(initialState)).toBe(true);
+    }
+  });
+
   it('rejects a non-positive or unsafe batch cap', () => {
     const world = createWorld('w');
     const inventory = createInventory({ owners: ['north'] });

@@ -83,6 +83,67 @@ describe('population consumption', () => {
     ]);
   });
 
+  it('rejects malformed or cohort-inconsistent initial consumption state', () => {
+    const makeConsumer = (initialState: unknown) => {
+      const inventory = createInventory({ owners: ['household', 'seller'] });
+      const money = createMoneyLedger({ accounts: ['household-cash', 'seller-cash'] });
+      const market = createCityMarket({
+        cityId: 'town',
+        inventory,
+        money,
+        participants: [
+          { ownerId: 'household', accountId: 'household-cash' },
+          { ownerId: 'seller', accountId: 'seller-cash' },
+        ],
+      });
+      return createConsumptionSystem({
+        world: createWorld('initial-consumption'),
+        cohort: {
+          cohortId: 'families',
+          cityId: 'town',
+          population: 1,
+          openingBudget: 1,
+          needs: [{ commodity: 'grain', quantity: 2 }],
+        },
+        buyer: { ownerId: 'household', accountId: 'household-cash' },
+        sellers: {},
+        prices: {},
+        market,
+        inventory,
+        money,
+        initialState: initialState as never,
+      });
+    };
+    const invalidStates = [
+      null,
+      { unmetNeeds: {}, cumulativeUnmetNeeds: [] },
+      { unmetNeeds: [{ commodity: 'wood', quantity: 1 }], cumulativeUnmetNeeds: [] },
+      { unmetNeeds: [{ commodity: 'grain', quantity: 3 }], cumulativeUnmetNeeds: [] },
+      { unmetNeeds: [{ commodity: 'grain', quantity: 0 }], cumulativeUnmetNeeds: [] },
+      {
+        unmetNeeds: [{ commodity: 'grain', quantity: Number.MAX_SAFE_INTEGER + 1 }],
+        cumulativeUnmetNeeds: [],
+      },
+      { unmetNeeds: [null], cumulativeUnmetNeeds: [] },
+      { unmetNeeds: [], cumulativeUnmetNeeds: [{ commodity: 'wood', quantity: 1 }] },
+      {
+        unmetNeeds: [],
+        cumulativeUnmetNeeds: [{ commodity: 'grain', quantity: Number.MAX_SAFE_INTEGER + 1 }],
+      },
+      {
+        unmetNeeds: [],
+        cumulativeUnmetNeeds: [
+          { commodity: 'grain', quantity: 1 },
+          { commodity: 'grain', quantity: 2 },
+        ],
+      },
+    ];
+
+    for (const initialState of invalidStates) {
+      expect(() => makeConsumer(initialState)).toThrow(RangeError);
+    }
+  });
+
   it('checks cumulative overflow before making any trades in the tick', () => {
     const inventory = createInventory({
       owners: ['household', 'grain-seller'],
