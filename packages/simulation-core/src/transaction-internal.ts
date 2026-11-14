@@ -2,10 +2,16 @@ import type { Commodity } from './commodity.js';
 import type { ShipmentInput } from './routes.js';
 
 export interface InventoryTransactionParticipant {
+  isCurrent(): boolean;
   prepareTransfers(
     transfers: readonly {
       readonly fromOwnerId: string;
       readonly toOwnerId: string;
+      readonly commodity: Commodity;
+      readonly quantity: number;
+    }[],
+    consumes?: readonly {
+      readonly ownerId: string;
       readonly commodity: Commodity;
       readonly quantity: number;
     }[],
@@ -19,7 +25,33 @@ export interface InventoryTransactionParticipant {
 }
 
 export interface MoneyTransactionParticipant {
+  isCurrent(): boolean;
   prepareTransfer(fromAccountId: string, toAccountId: string, amount: number): () => void;
+  prepareTransfers(
+    transfers: readonly {
+      readonly fromAccountId: string;
+      readonly toAccountId: string;
+      readonly amount: number;
+    }[],
+  ): () => void;
+}
+
+export interface MarketTransactionParticipant {
+  isCurrent(): boolean;
+  prepareConsumption(
+    trades: readonly {
+      readonly buyerId: string;
+      readonly sellerId: string;
+      readonly commodity: Commodity;
+      readonly quantity: number;
+      readonly unitPrice: number;
+    }[],
+    buyerId: string,
+    buyerAccountId: string,
+    cityId: string,
+    inventory: object,
+    money: object,
+  ): () => void;
 }
 
 export interface RouteTransactionParticipant {
@@ -33,6 +65,7 @@ export interface TransactionParticipants {
   readonly inventory?: InventoryTransactionParticipant;
   readonly money?: MoneyTransactionParticipant;
   readonly network?: RouteTransactionParticipant;
+  readonly market?: MarketTransactionParticipant;
 }
 
 const participants = new WeakMap<object, TransactionParticipants>();
