@@ -11,6 +11,7 @@ describe('world identity and snapshots', () => {
   it('createWorld stores a nonempty world id and starts at tick 0', () => {
     const world = createWorld('world-alpha');
     expect(world.getState()).toEqual({ worldId: 'world-alpha', tick: 0 });
+    expect(world.getStatus()).toEqual({ state: 'ready' });
   });
 
   it('createWorld rejects an empty or non-string world id', () => {
@@ -84,6 +85,63 @@ describe('advancing ticks', () => {
 
     expect(calls).toEqual(['first:1', 'second:1', 'first:2', 'second:2']);
     expect(world.getState()).toEqual({ worldId: 'w', tick: 2 });
+  });
+
+  it('fails and stops the tick when a system returns a rejected thenable', async () => {
+    const world = createWorld('w');
+    const calls: string[] = [];
+    world.registerTickSystem('async-result', () => {
+      calls.push('async-result');
+      return Promise.reject(new Error('async side effect failed')) as unknown as void;
+    });
+    world.registerTickSystem('later', () => calls.push('later'));
+
+    expect(() => world.step()).toThrow(/must be synchronous/);
+    await Promise.resolve();
+
+    expect(calls).toEqual(['async-result']);
+    expect(world.getState()).toEqual({ worldId: 'w', tick: 1 });
+    expect(world.getStatus()).toEqual({ state: 'failed', tick: 1, systemName: 'async-result' });
+    expect(() => world.step()).toThrow(/failed tick/);
+    expect(world.getState()).toEqual({ worldId: 'w', tick: 1 });
+  });
+
+  it('records a failed tick and system without undoing earlier side effects', () => {
+    const world = createWorld('w');
+    const effects: string[] = [];
+    const failure = new Error('system failed');
+    world.registerTickSystem('first', () => effects.push('mutated'));
+    world.registerTickSystem('broken', () => {
+      throw failure;
+    });
+
+    expect(() => world.step()).toThrow(failure);
+    expect(effects).toEqual(['mutated']);
+    expect(world.getState()).toEqual({ worldId: 'w', tick: 1 });
+    expect(world.getStatus()).toEqual({ state: 'failed', tick: 1, systemName: 'broken' });
+  });
+
+  it('refuses subsequent step and run calls after a failure, including run(0)', () => {
+    const world = createWorld('w');
+    world.registerTickSystem('broken', () => {
+      throw new Error('failed');
+    });
+    expect(() => world.step()).toThrow('failed');
+
+    expect(() => world.step()).toThrow(/failed tick/);
+    expect(() => world.run(0)).toThrow(/failed tick/);
+    expect(() => world.run(1)).toThrow(/failed tick/);
+    expect(world.getState()).toEqual({ worldId: 'w', tick: 1 });
+    expect(world.getStatus()).toEqual({ state: 'failed', tick: 1, systemName: 'broken' });
+  });
+
+  it('rejects recursive advancement from a tick callback', () => {
+    const world = createWorld('w');
+    world.registerTickSystem('recursive', () => world.step());
+
+    expect(() => world.step()).toThrow(/reentrant/);
+    expect(world.getState()).toEqual({ worldId: 'w', tick: 1 });
+    expect(world.getStatus()).toEqual({ state: 'failed', tick: 1, systemName: 'recursive' });
   });
 
   it('starts systems registered during a tick on the next tick', () => {
