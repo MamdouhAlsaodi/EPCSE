@@ -13,6 +13,16 @@ export interface InventoryInput {
 
 export type InventoryBalance = InventoryBalanceInput;
 
+export interface RecipeLine {
+  readonly commodity: Commodity;
+  readonly quantity: number;
+}
+
+export interface ProductionRecipe {
+  readonly inputs: readonly RecipeLine[];
+  readonly outputs: readonly RecipeLine[];
+}
+
 export interface InventorySnapshot {
   readonly balances: readonly InventoryBalance[];
 }
@@ -25,6 +35,7 @@ export interface Inventory {
     commodity: Commodity,
     quantity: number,
   ): InventorySnapshot;
+  produce(ownerId: string, recipe: ProductionRecipe, batchCount: number): InventorySnapshot;
 }
 
 export function createInventory(input: InventoryInput): Inventory {
@@ -100,6 +111,55 @@ export function createInventory(input: InventoryInput): Inventory {
       }
       balances.set(sourceKey, sourceBalance - quantity);
       balances.set(destinationKey, destinationBalance + quantity);
+      return snapshot();
+    },
+    produce: (ownerId, recipe, batchCount) => {
+      if (!owners.has(ownerId)) throw new RangeError(`unknown owner: ${ownerId}`);
+      if (!Number.isSafeInteger(batchCount) || batchCount <= 0) {
+        throw new RangeError('batch count must be a positive safe integer');
+      }
+      if (!Array.isArray(recipe.inputs) || recipe.inputs.length === 0) {
+        throw new RangeError('recipe inputs must be nonempty');
+      }
+      if (!Array.isArray(recipe.outputs) || recipe.outputs.length === 0) {
+        throw new RangeError('recipe outputs must be nonempty');
+      }
+      const validateLines = (lines: readonly RecipeLine[]): Map<Commodity, number> => {
+        const quantities = new Map<Commodity, number>();
+        for (const line of lines) {
+          validateCommodity(line.commodity);
+          if (!Number.isSafeInteger(line.quantity) || line.quantity <= 0) {
+            throw new RangeError('recipe quantities must be positive safe integers');
+          }
+          if (quantities.has(line.commodity)) {
+            throw new RangeError(`duplicate recipe commodity: ${line.commodity}`);
+          }
+          if (line.quantity > Number.MAX_SAFE_INTEGER / batchCount) {
+            throw new RangeError('recipe quantity would exceed Number.MAX_SAFE_INTEGER');
+          }
+          quantities.set(line.commodity, line.quantity * batchCount);
+        }
+        return quantities;
+      };
+      const inputs = validateLines(recipe.inputs);
+      const outputs = validateLines(recipe.outputs);
+      const finalBalances = new Map<Commodity, number>();
+      for (const [commodity, quantity] of inputs) {
+        const current = balances.get(key(ownerId, commodity)) ?? 0;
+        if (current < quantity) throw new RangeError('insufficient inventory for production');
+        finalBalances.set(commodity, current - quantity);
+      }
+      for (const [commodity, quantity] of outputs) {
+        const current = balances.get(key(ownerId, commodity)) ?? 0;
+        const afterInput = finalBalances.get(commodity) ?? current;
+        if (quantity > Number.MAX_SAFE_INTEGER - afterInput) {
+          throw new RangeError('production inventory would exceed Number.MAX_SAFE_INTEGER');
+        }
+        finalBalances.set(commodity, afterInput + quantity);
+      }
+      for (const [commodity, quantity] of finalBalances) {
+        balances.set(key(ownerId, commodity), quantity);
+      }
       return snapshot();
     },
   };
