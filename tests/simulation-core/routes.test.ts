@@ -10,6 +10,120 @@ describe('route shipments', () => {
     produce: backing.produce.bind(backing),
   });
 
+  it('pauses a closed route, blocks departures, and resumes the exact remaining journey', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [
+        { ownerId: 'north', commodity: 'grain', quantity: 5 },
+        { ownerId: 'north', commodity: 'wood', quantity: 1 },
+      ],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        {
+          routeId: 'road',
+          sourceCityId: 'north',
+          destinationCityId: 'south',
+          travelTicks: 3,
+          capacity: 1,
+        },
+        { routeId: 'river', sourceCityId: 'north', destinationCityId: 'east', travelTicks: 1 },
+      ],
+    });
+    network.depart({ shipmentId: 'paused', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.advanceTick();
+    network.closeRoute('road');
+    expect(network.advanceTick().shipments[0]).toMatchObject({
+      status: 'in-transit',
+      arrivalTick: 3,
+    });
+    expect(network.advanceTick().shipments[0]).toMatchObject({
+      status: 'in-transit',
+      arrivalTick: 3,
+    });
+    expect(() =>
+      network.depart({ shipmentId: 'blocked', routeId: 'road', commodity: 'wood', quantity: 1 }),
+    ).toThrow(/closed/i);
+    network.depart({ shipmentId: 'other-route', routeId: 'river', commodity: 'wood', quantity: 1 });
+    network.advanceTick();
+    expect(
+      network.getState().shipments.find(({ shipmentId }) => shipmentId === 'paused')?.status,
+    ).toBe('in-transit');
+    expect(
+      inventory
+        .getState()
+        .balances.find(({ ownerId, commodity }) => ownerId === 'transit' && commodity === 'grain')
+        ?.quantity,
+    ).toBe(1);
+    network.openRoute('road');
+    expect(
+      network.advanceTick().shipments.find(({ shipmentId }) => shipmentId === 'paused'),
+    ).toMatchObject({ status: 'in-transit', arrivalTick: 6 });
+    expect(
+      network.advanceTick().shipments.find(({ shipmentId }) => shipmentId === 'paused')?.status,
+    ).toBe('arrived');
+  });
+
+  it('restores a paused route with defensive snapshots and rejects malformed closure state', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const route = {
+      routeId: 'road',
+      sourceCityId: 'north',
+      destinationCityId: 'south',
+      travelTicks: 3,
+    };
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [route],
+    });
+    network.depart({ shipmentId: 'paused', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.advanceTick();
+    network.closeRoute('road');
+    network.advanceTick();
+    const state = network.getState();
+    const external = network.getState();
+    (external as unknown as { closedRouteIds: string[] }).closedRouteIds.push('fake');
+    (external.shipments[0] as unknown as { pausedRemainingTicks: number }).pausedRemainingTicks =
+      99;
+    expect(network.getState()).toEqual(state);
+
+    const restored = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [route],
+      initialState: state,
+    });
+    restored.advanceTick();
+    expect(restored.getState().shipments[0]).toMatchObject({
+      status: 'in-transit',
+      pausedRemainingTicks: 2,
+    });
+    restored.openRoute('road');
+    expect(restored.advanceTick().shipments[0]?.status).toBe('in-transit');
+    expect(restored.advanceTick().shipments[0]?.status).toBe('arrived');
+
+    const malformed = { ...state, closedRouteIds: ['missing'] };
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: [route],
+        initialState: malformed,
+      }),
+    ).toThrow(/closed route/i);
+    expect(network.getState()).toEqual(state);
+  });
+
   it('requires every city and the transit custodian to be inventory owners', () => {
     const inventory = createInventory({ owners: ['north', 'transit'] });
     expect(() =>
@@ -18,6 +132,84 @@ describe('route shipments', () => {
     expect(() =>
       createRouteNetwork({ cityIds: ['north'], transitOwnerId: 'missing', inventory }),
     ).toThrow(/transit/);
+  });
+
+  it('rejects a paused snapshot whose implied closure begins in the future', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'transit', commodity: 'grain', quantity: 1 }],
+    });
+    const route = {
+      routeId: 'road',
+      sourceCityId: 'north',
+      destinationCityId: 'south',
+      travelTicks: 3,
+    };
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: [route],
+        initialState: {
+          tick: 2,
+          routes: [route],
+          closedRouteIds: ['road'],
+          shipments: [
+            {
+              shipmentId: 'load',
+              routeId: 'road',
+              commodity: 'grain',
+              quantity: 1,
+              departureTick: 0,
+              arrivalTick: 100,
+              status: 'in-transit',
+              pausedRemainingTicks: 2,
+            },
+          ],
+        },
+      }),
+    ).toThrow(/shipment/i);
+  });
+
+  it('restores a valid paused snapshot after multiple closure and reopening cycles', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const route = {
+      routeId: 'road',
+      sourceCityId: 'north',
+      destinationCityId: 'south',
+      travelTicks: 4,
+    };
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [route],
+    });
+    network.depart({ shipmentId: 'load', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.advanceTick();
+    network.closeRoute('road');
+    network.advanceTick();
+    network.openRoute('road');
+    network.advanceTick();
+    network.closeRoute('road');
+    const state = network.getState();
+    expect(state).toMatchObject({
+      tick: 3,
+      shipments: [{ arrivalTick: 5, pausedRemainingTicks: 2 }],
+    });
+    expect(
+      createRouteNetwork({
+        cityIds: ['north', 'south'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: [route],
+        initialState: state,
+      }).getState(),
+    ).toEqual(state);
   });
 
   it('rejects malformed initial shipment identifiers, statuses, and temporal state', () => {

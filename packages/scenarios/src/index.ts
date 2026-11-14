@@ -170,7 +170,11 @@ function validateSnapshot(value: TwoCitySimulationSnapshot): void {
       throw new RangeError('invalid money balance');
   if (accounts.size) throw new RangeError('missing money account');
   const shipments = value.routes.shipments;
+  const closedRouteIds = value.routes.closedRouteIds ?? [];
   if (
+    !Array.isArray(closedRouteIds) ||
+    closedRouteIds.some((routeId) => routeId !== configuration.route.routeId) ||
+    new Set(closedRouteIds).size !== closedRouteIds.length ||
     !Array.isArray(shipments) ||
     !Array.isArray(value.routes.routes) ||
     value.routes.routes.length !== 1 ||
@@ -198,10 +202,18 @@ function validateSnapshot(value: TwoCitySimulationSnapshot): void {
       s.quantity === 0 ||
       !safeCounter(s.departureTick) ||
       !safeCounter(s.arrivalTick) ||
-      s.arrivalTick !== s.departureTick + 3 ||
+      s.arrivalTick < s.departureTick + 3 ||
       s.departureTick > value.tick ||
       !['in-transit', 'arrived'].includes(s.status) ||
-      (s.status === 'in-transit' ? s.arrivalTick <= value.tick : s.arrivalTick > value.tick)
+      (s.status === 'in-transit'
+        ? closedRouteIds.includes(s.routeId)
+          ? !Number.isSafeInteger(s.pausedRemainingTicks) ||
+            s.pausedRemainingTicks! <= 0 ||
+            s.pausedRemainingTicks! > 3 ||
+            s.arrivalTick - s.pausedRemainingTicks! < s.departureTick ||
+            s.arrivalTick - s.pausedRemainingTicks! > value.tick
+          : s.pausedRemainingTicks !== undefined || s.arrivalTick <= value.tick
+        : s.arrivalTick > value.tick || s.pausedRemainingTicks !== undefined)
     )
       throw new RangeError('invalid shipment state');
     ids.add(s.shipmentId);
