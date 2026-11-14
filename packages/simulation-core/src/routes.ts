@@ -10,6 +10,11 @@ export interface RouteInput {
   readonly sourceCityId: string;
   readonly destinationCityId: string;
   readonly travelTicks: number;
+  /**
+   * Provisional capacity in shared abstract slots: each unit uses one slot regardless
+   * of commodity. This is not a measure of physical weight or volume.
+   */
+  readonly capacity?: number;
 }
 
 export interface RouteNetworkInput {
@@ -42,9 +47,10 @@ export interface RouteNetwork {
   getState(): RouteNetworkSnapshot;
   depart(shipment: ShipmentInput): RouteNetworkSnapshot;
   /**
-   * Moves from t to t+1 before delivering shipments due at t+1. Custom Inventory
-   * implementations support single due deliveries only; multiple due deliveries are
-   * rejected because the public Inventory API cannot guarantee an atomic batch.
+   * Moves from t to t+1 before delivering shipments due at t+1. Built-in Inventory
+   * batches due deliveries atomically. Custom Inventory deliveries are transferred
+   * sequentially and may leave earlier deliveries mutated if a later transfer throws;
+   * the public Inventory API does not provide rollback.
    */
   advanceTick(): RouteNetworkSnapshot;
 }
@@ -89,6 +95,12 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     if (!Number.isSafeInteger(route.travelTicks) || route.travelTicks <= 0) {
       throw new RangeError('travel ticks must be a positive safe integer');
     }
+    if (
+      route.capacity !== undefined &&
+      (!Number.isSafeInteger(route.capacity) || route.capacity <= 0)
+    ) {
+      throw new RangeError('route capacity must be a positive safe integer');
+    }
     routes.set(route.routeId, { ...route });
   }
   let shipments: Shipment[] = [];
@@ -113,6 +125,20 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       throw new RangeError('arrival tick would exceed Number.MAX_SAFE_INTEGER');
     }
     const arrivalTick = tick + route.travelTicks;
+    if (route.capacity !== undefined) {
+      let inTransit = 0;
+      for (const active of shipments) {
+        if (active.routeId === route.routeId && active.status === 'in-transit') {
+          if (active.quantity > route.capacity - inTransit) {
+            throw new RangeError(`route capacity exceeded: ${route.routeId}`);
+          }
+          inTransit += active.quantity;
+        }
+      }
+      if (shipment.quantity > route.capacity - inTransit) {
+        throw new RangeError(`route capacity exceeded: ${route.routeId}`);
+      }
+    }
     const stagedShipments = [
       ...shipments,
       { ...shipment, departureTick: tick, arrivalTick, status: 'in-transit' as const },
@@ -152,11 +178,6 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       const due = shipments.filter(
         ({ status, arrivalTick }) => status === 'in-transit' && arrivalTick <= nextTick,
       );
-      // Foreign Inventory implementations expose only single transfers, so multiple due
-      // deliveries cannot be proven all-or-nothing. Reject them before reading/mutating state.
-      if (!inventoryParticipant && due.length > 1) {
-        throw new TypeError('multiple due shipments require atomic inventory transfers');
-      }
       const balances = new Map<string, number>();
       for (const { ownerId, commodity, quantity } of input.inventory.getState().balances) {
         balances.set(`${ownerId}\0${commodity}`, quantity);
@@ -186,15 +207,19 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
         quantity: shipment.quantity,
       }));
       if (inventoryParticipant) {
+        // The built-in inventory stages the complete batch before committing it.
         inventoryParticipant.prepareTransfers(transfers)();
-      } else if (transfers.length === 1) {
-        const transfer = transfers[0]!;
-        input.inventory.transfer(
-          transfer.fromOwnerId,
-          transfer.toOwnerId,
-          transfer.commodity,
-          transfer.quantity,
-        );
+      } else {
+        // Custom inventories have no batch/rollback contract: each transfer may mutate,
+        // and a later throw can leave earlier deliveries applied.
+        for (const transfer of transfers) {
+          input.inventory.transfer(
+            transfer.fromOwnerId,
+            transfer.toOwnerId,
+            transfer.commodity,
+            transfer.quantity,
+          );
+        }
       }
       for (const shipment of due) {
         const index = shipments.findIndex(({ shipmentId }) => shipmentId === shipment.shipmentId);

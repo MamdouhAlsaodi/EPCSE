@@ -16,9 +16,15 @@ export interface TickContext {
 /** Synchronous operation invoked once per tick, in registration order. */
 export type TickSystem = (context: TickContext) => void;
 
+export type WorldStatus =
+  | { readonly state: 'ready' }
+  | { readonly state: 'failed'; readonly tick: number; readonly systemName: string };
+
 export interface World {
   /** Independent read-only snapshot of the current world state. */
   getState(): WorldSnapshot;
+  /** Current tick-processing status. On failure, earlier systems may already have mutated state; no rollback is attempted. */
+  getStatus(): WorldStatus;
   /** Register a uniquely named system; it runs on subsequent ticks. */
   registerTickSystem(name: string, system: TickSystem): void;
   /** Advance by exactly one tick. */
@@ -35,9 +41,19 @@ export function createWorld(worldId: string): World {
     throw new RangeError('worldId must be a nonempty string');
   }
   let tick = 0;
+  let failed: Extract<WorldStatus, { state: 'failed' }> | undefined;
+  let advancing = false;
   const systems = new Map<string, TickSystem>();
   const snapshot = (): WorldSnapshot => ({ worldId, tick });
   const advance = (ticks: number): WorldSnapshot => {
+    if (failed) {
+      throw new Error(
+        `world is in failed tick state at tick ${failed.tick} (system: ${failed.systemName})`,
+      );
+    }
+    if (advancing) {
+      throw new Error('reentrant world advancement is not allowed');
+    }
     // Number.isInteger rejects non-numbers, NaN and ±Infinity.
     if (!Number.isInteger(ticks)) {
       throw new TypeError(`ticks must be an integer, got ${ticks}`);
@@ -54,18 +70,40 @@ export function createWorld(worldId: string): World {
       tick += ticks;
       return snapshot();
     }
-    for (let i = 0; i < ticks; i++) {
-      tick++;
-      const context: TickContext = { worldId, tick };
-      // Freeze this tick's system list; registrations during a tick start next tick.
-      for (const system of [...systems.values()]) {
-        system(context);
+    advancing = true;
+    try {
+      for (let i = 0; i < ticks; i++) {
+        tick++;
+        const context: TickContext = { worldId, tick };
+        // Freeze this tick's system list; registrations during a tick start next tick.
+        for (const [name, system] of [...systems.entries()]) {
+          try {
+            const result: unknown = system(context);
+            if ((typeof result === 'object' && result !== null) || typeof result === 'function') {
+              if (typeof (result as { then?: unknown }).then === 'function') {
+                // Consume async failures to avoid an unhandled rejection. Async side effects
+                // may continue after this failure and cannot be rolled back.
+                void Promise.resolve(result).catch(() => undefined);
+                throw new Error(
+                  'tick systems must be synchronous; asynchronous side effects cannot be rolled back',
+                );
+              }
+            }
+          } catch (error) {
+            // Systems may have mutated external state; the world cannot roll it back.
+            failed = { state: 'failed', tick, systemName: name };
+            throw error;
+          }
+        }
       }
+      return snapshot();
+    } finally {
+      advancing = false;
     }
-    return snapshot();
   };
   return {
     getState: snapshot,
+    getStatus: () => (failed ? { ...failed } : { state: 'ready' }),
     registerTickSystem: (name, system) => {
       if (typeof name !== 'string' || name.length === 0) {
         throw new RangeError('tick system name must be a nonempty string');

@@ -52,6 +52,55 @@ describe('paid shipments', () => {
     ]);
   });
 
+  it('rejects paid departures over route capacity without side effects', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 5 }],
+    });
+    const money = createMoneyLedger({
+      accounts: ['buyer-cash', 'seller-cash'],
+      balances: [{ accountId: 'buyer-cash', amount: 50 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        {
+          routeId: 'road',
+          sourceCityId: 'north',
+          destinationCityId: 'south',
+          travelTicks: 2,
+          capacity: 2,
+        },
+      ],
+    });
+    const coordinator = createPaidShipmentCoordinator({ inventory, money, network });
+    coordinator.depart({
+      shipment: { shipmentId: 'load-1', routeId: 'road', commodity: 'grain', quantity: 2 },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 10,
+    });
+    const before = {
+      inventory: inventory.getState(),
+      money: money.getState(),
+      network: network.getState(),
+    };
+
+    expect(() =>
+      coordinator.depart({
+        shipment: { shipmentId: 'load-2', routeId: 'road', commodity: 'grain', quantity: 1 },
+        buyerAccountId: 'buyer-cash',
+        sellerAccountId: 'seller-cash',
+        payment: 10,
+      }),
+    ).toThrow(/capacity/);
+    expect(inventory.getState()).toEqual(before.inventory);
+    expect(money.getState()).toEqual(before.money);
+    expect(network.getState()).toEqual(before.network);
+  });
+
   it('leaves inventory, money, and shipment state unchanged when payment preparation fails', () => {
     const { inventory, money, network, coordinator } = makeShipmentSystem();
     const before = {
