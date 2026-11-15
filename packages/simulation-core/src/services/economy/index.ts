@@ -52,6 +52,7 @@ type EconomyState = {
   producers: Record<
     string,
     {
+      id: string;
       stopped: string | null;
       batches: number;
       employed: number;
@@ -271,6 +272,7 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
       producers.map((p) => [
         p.id,
         {
+          id: p.id,
           stopped: null,
           batches: 0,
           employed: 0,
@@ -319,8 +321,8 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
     let a = draft.accounting as AccountingState;
     const employedByCohort = new Map<string, number>();
     const wageIncomeByCohort = new Map<string, number>();
-    for (const p of producers) {
-      const result = e.producers[p.id]!;
+    for (const result of Object.values(e.producers)) {
+      const p: LocalEconomyProducer = result;
       result.batches = 0;
       result.employed = 0;
       const firm = (
@@ -454,8 +456,9 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
   engine.registerPhaseSystem('market', 'local-economy:quote', (draft) => {
     const e = draft.economy as EconomyState,
       a = draft.accounting as AccountingState;
-    for (const s of sellers) {
-      const k = key(s.cityId, s.commodity),
+    for (const configured of sellers) {
+      const k = key(configured.cityId, configured.commodity),
+        s = e.sellers[k]!,
         supply = stock(a, s.ownerId, s.commodity),
         demand = cohorts
           .filter((c) => cohortCity(draft, c) === s.cityId)
