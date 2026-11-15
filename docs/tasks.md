@@ -1,13 +1,13 @@
 # EPCSE — سجل المهام والتتبع
 
-**مسودة غير معتمدة؛ جميع المهام غير منفذة.** المصدر [الأصل](reference/original-spec-ar.md) كاملًا، والنطاق [product-spec.md](product-spec.md). المشروع واحد؛ S0 وVS وM1 شرائح قبول متراكمة لا منتجات منفصلة. لا آجال تقويمية ولا إذن تنفيذ بهذه القائمة.
+**مسودة غير معتمدة؛ لا يُغلق T00/T01/T02 بهذه الأدلة.** فُحص bootstrap الموجود جزئيًا فقط؛ بعض اختبارات النواة والتكامل موجودة، لكن ذلك لا يثبت الشرائح S0/VS/M1. الأدلة الحالية أدناه snapshot قابل للتطور عند تحقق runtime لاحق، وليست بوابات قبول. المصدر [الأصل](reference/original-spec-ar.md) كاملًا، والنطاق [product-spec.md](product-spec.md). المشروع واحد؛ S0 وVS وM1 شرائح قبول متراكمة لا منتجات منفصلة. لا آجال تقويمية ولا إذن تنفيذ بهذه القائمة.
 
 الوثائق المكملة الحالية: [السيناريوهات والاختبارات](scenarios.md)، [القرارات والعقود](decisions.md) و[العقود التقنية](technical-contracts.md)، [التفويض والتكامل](delegation.md)، [المعمارية](architecture.md)، و[رؤية المملكة](kingdom-vision.md). هذه الملفات موجودة؛ لا يوجد `adr/README.md` أو `delegation-playbook.md` مستقل. هذه الخطة لا تستبدل العقود التقنية القائمة.
 
 ## 1. قواعد القبول والملكية
 
 - كل T أدناه تشمل النطاق والمخرج والقبول والاختبار؛ لا تُغلق لمجرد وجود الملفات. أدلة التحقق الفعلية مطلوبة لاحقًا.
-- المسارات البرمجية **مستهدفة لا موجودة**؛ `core` اختصار `packages/simulation-core/src`، و`tests` تعني `tests/` من الجذر. الاختبارات إلزامية بحكم المصدر، ولو كانت اختيارية في قالب Spec Kit.
+- بعض المسارات البرمجية **مستهدفة لا موجودة**؛ المسارات التي تسمي الاختبارات الحالية في مصفوفة §8 موجودة فعلًا. `core` اختصار `packages/simulation-core/src`، و`tests` تعني `tests/` من الجذر. الاختبارات إلزامية بحكم المصدر، ولو كانت اختيارية في قالب Spec Kit.
 - المالك دور مقترح لا وكيل مفوض. المنسق يملك `models/` والعقود المشتركة و`services/phases.ts` وتركيب الوحدات وملفات الاختبار المشتركة. العمال يملكون مسارات خدماتهم واختباراتها فقط؛ لا كتابة متزامنة في ملف واحد.
 - الدلالة `[P]` تعني قابلية توازٍ **بعد** اكتمال الاعتماديات وتثبيت العقد، لا استقلال المهمة عن المشروع. كل سؤال Q يعطل تفاصيله فقط؛ يسجل التعطيل ولا يُخمن جوابه.
 - القبول المشترك: typecheck وlint والاختبار المحدد، ثم determinism وINV-01–10 وأقدم شريحة متكاملة تعمل. انكسار invariant يوقف التكامل، لا يبرر تخفيف الاختبار.
@@ -90,7 +90,70 @@ AC يحيل إلى النص الكامل في [مواصفة المنتج](produc
 | التحكم والتفويض الاختياري | T25 | حدود وصلاحيات/سحب بلا محو آثار؛ SC-19 |
 | استقلال المنشآت وعملياتها | T12/T26 | استقلال الحالة/الملكية/الموقع والعمليات؛ SC-20 |
 
-## 8. ترتيب الدمج وإغلاق المشروع
+## 8. مصفوفة الأدلة الحالية (منفصلة عن خريطة التخطيط)
+
+الحالة أدناه تخص checkout عند مراجعة هذا packet، ولا تساوي قبول FR/SC/DoD. تشير «موجود جزئي» إلى اختبار/تنفيذ محدود فقط؛ لا توسّع نتيجته إلى سيناريو أو شريحة كاملة. SC-01–20 لا تملك اختبارات سيناريوهاتها المقررة؛ اختبارات الوحدات القريبة لا تثبتها. خط الأساس عند `7671ffa` (Node 26.7.0، pnpm 10.28.2): نفّذ verifier محليًا `corepack pnpm typecheck` و`lint` و`test` (13 ملفات/165 اختبارًا) و`build` بنجاح، ثم `node apps/cli/dist/main.js` و`--reroute-demo`؛ كلاهما أعلن demo غير مكتمل. CI في `.github/workflows/ci.yml` يشغّل gates وCLI وpublic import على Node 24، لكن نجاحه على رأس هذا التعديل لا يُفترض حتى فحصه. أضيف `corepack pnpm run cli` للتشغيل بعد build، لا واجهة `run --scenario` كاملة؛ لا `bench` أو `test:e2e` حقيقيين بعد.
+
+| ID | الدليل الحالي الفعلي | الفجوة/حد الدليل |
+|---|---|---|
+| FR-01 | `packages/simulation-core/src/world.ts`; `tests/simulation-core/world.test.ts`; integration fixtures `tests/integration/two-city.test.ts`, `multicity-reroute.test.ts` | world بسيط وdemo مبرمج؛ لا 1000 tick/restore/versioned command contract. |
+| FR-02 | `inventory.test.ts`, `money.test.ts`, `paid-shipments.test.ts` في `tests/simulation-core/` | أجزاء معاملات ومخزون فقط؛ لا invariant عام متكامل لكل tick. |
+| FR-03 | `production.test.ts` | نموذج إنتاج جزئي، لا منشآت/وظائف/دورة كاملة. |
+| FR-04 | `consumption.test.ts`, `population.test.ts` | عمليات محدودة؛ لا هجرة/فئات/رفاه مترابطة كاملة. |
+| FR-05 | `pricing.test.ts`, `market-clearing.test.ts` | وحدات تسعير/تصفية فقط؛ لا السيناريوهات أو كل تسوية السوق. |
+| FR-06 | `routes.test.ts`, `paid-shipments.test.ts`, `tests/integration/multicity-reroute.test.ts` | مسارات/إعادة توجيه محدودة؛ لا ADR-07 كامل ولا سوق/دبلوماسية متكاملة. |
+| FR-07 | `tests/integration/two-city.test.ts` و`multicity-reroute.test.ts` fixtures | fixture مدن فقط؛ لا بنية/استثمار/حركة مكتملة. |
+| FR-08 | لا اختبار حكومة/سياسات حالي | لا خزينة/سياسة حكومية كنظام متكامل. |
+| FR-09 | لا اختبار سياسة/إضراب حالي | لا جماعات أو حالات تفاوض. |
+| FR-10 | `tests/integration/multicity-reroute.test.ts` | اختبار مسار/شحنة تجريبي لا علاقات/معاهدات دبلوماسية. |
+| FR-11 | اختبارات وحدات النواة؛ لا suite للوكلاء | لا وكيل أو سجل بدائل/قيود. |
+| FR-12 | تقارير demo في `apps/cli/src/main.ts` | لا تحليل زمني/API/UI/مقارنة snapshots. |
+| SC-01 | أقرب دليل: `tests/integration/two-city.test.ts` | لا 180 tick أو قياس كامل؛ SC غير مثبت. |
+| SC-02 | `tests/simulation-core/production.test.ts`, `consumption.test.ts` | لا صدمة 40%/30 tick أو baseline؛ SC غير مثبت. |
+| SC-03 | `tests/simulation-core/paid-shipments.test.ts` | لا سيناريو فائض/نقص وسوق متصل؛ SC غير مثبت. |
+| SC-04 | `tests/simulation-core/routes.test.ts`, `tests/integration/multicity-reroute.test.ts` | لا إغلاق طريق لمدة 20 مع قائمات؛ SC غير مثبت. |
+| SC-05 | لا دليل مباشر | لا إضراب متعدد العوامل؛ SC غير مثبت. |
+| SC-06 | لا دليل مباشر | لا تفاوض/تسوية؛ SC غير مثبت. |
+| SC-07 | لا دليل مباشر | لا دعم حكومي؛ SC غير مثبت. |
+| SC-08 | `tests/simulation-core/production.test.ts` فقط كعملية قريبة | لا ضريبة/خزينة/استثمار؛ SC غير مثبت. |
+| SC-09 | لا دليل مباشر | لا اتفاق رسوم؛ SC غير مثبت. |
+| SC-10 | لا دليل مباشر | لا قيود ورد دبلوماسي؛ SC غير مثبت. |
+| SC-11 | لا دليل مباشر | Q08 مفتوح؛ لا انتقال مؤسسي أو تأجيل معتمد. |
+| SC-12 | `tests/simulation-core/population.test.ts` | لا هجرة مصدر/وجهة؛ SC غير مثبت. |
+| SC-13 | `tests/simulation-core/production.test.ts`, `inventory.test.ts` | لا إفلاس/تصفية/التزامات؛ SC غير مثبت. |
+| SC-14 | لا دليل مباشر | لا معالجة عجز حكومة؛ SC غير مثبت. |
+| SC-15 | لا اختبار determinism بالمواصفة/1000 tick | لا hash حالة/أحداث أو تشغيلين 1000 tick؛ SC غير مثبت. |
+| SC-16 | `tests/integration/two-city.test.ts` يغطي restore/continue لديمو محدود | لا تفرع عند 200/مقارنة 100 أو snapshot عام للنواة؛ SC غير مثبت. |
+| SC-17 | اختبارات حدود محلية في `world.test.ts`, `money.test.ts`, `inventory.test.ts` | لا مصفوفة الحواف الشاملة ولا كل IDs؛ SC غير مثبت. |
+| SC-18 | لا اختبار عسكري | لا حركة/إمداد/اعتراض؛ SC غير مثبت. |
+| SC-19 | لا اختبار تفويض | لا مستشار/صلاحيات؛ SC غير مثبت. |
+| SC-20 | `tests/simulation-core/world.test.ts` يتحقق من هوية/ملكية المنشآت المستقلة | لا بناء/ترقية/إدارة/سعر/lifecycle أو نقل فعلي؛ SC غير مثبت. |
+| INV-01 | `tests/simulation-core/inventory.test.ts` | جزئي لا property-wide ولا invariant بعد كل tick. |
+| INV-02 | `tests/simulation-core/paid-shipments.test.ts` | حالات شحن محدودة لا تحقق شامل لكل المدن. |
+| INV-03 | `tests/simulation-core/money.test.ts`, `paid-shipments.test.ts` | حالات محاسبة محدودة؛ لا ledger عالمي لكل انتقال. |
+| INV-04 | `tests/simulation-core/population.test.ts` | لا conservation مع هجرة/ولادة/وفاة. |
+| INV-05 | `tests/simulation-core/pricing.test.ts`, `market-clearing.test.ts` | حالات سعر محدودة لا كل المؤشرات والحدود. |
+| INV-06 | `tests/simulation-core/production.test.ts` | وصفات/حالات محدودة؛ لا property test عام. |
+| INV-07 | `money.test.ts`, `inventory.test.ts` | لا قيود وحدات typed تغطي كل النطاق. |
+| INV-08 | `tests/simulation-core/world.test.ts` يؤكد صراحةً عدم rollback عند فشل tick | سلوك الذرية المطلوبة غائب؛ فشل tick قد يترك آثارًا. |
+| INV-09 | اختبارات world/transactions الحالية | لا codec/snapshot أو ثبات IDs بعد restore. |
+| INV-10 | لا اختبار agents/determinism | لا قرارات وكلاء ولا تعادل حتمي. |
+| DoD-01 | `apps/cli/src/main.ts`; `tests/contract/imports.test.ts` | CLI ديمو synthetic/provisional لا تشغيل محرك العالم؛ `cli` script يتطلب build. |
+| DoD-02 | multi-city fixture في `tests/integration/multicity-reroute.test.ts` | لا 3 دول/12 مدينة قابلة للتكوين. |
+| DoD-03 | اختبارات وحدات إنتاج/استهلاك/سوق/شحن منفصلة | لا ربط جميع الأنظمة. |
+| DoD-04 | `paid-shipments.test.ts` | أسباب/دفاتر شحنة محدودة؛ لا تفسير سياسات وقيود متكامل. |
+| DoD-05 | لا دليل سياسة | لا احتجاج/إضراب. |
+| DoD-06 | لا SC-01–17 suite | لم تُسجل اختبارات كاملة أو تأجيل معتمد. |
+| DoD-07 | اختبارات `tests/simulation-core/` المذكورة لـINV-01–07 | لا تحقق INV-01–10 ولا property suite. |
+| DoD-08 | لا اختبار 1000 tick determinism | غير متحقق. |
+| DoD-09 | `tests/integration/two-city.test.ts` يتحقق من restore/continue لديمو in-memory | لا snapshot عام أو تخزين دائم/استعادة العالم الكامل؛ T04/T17 باقية. |
+| DoD-10 | لا API/web/UI | غير متحقق. |
+| DoD-11 | لا counterfactual comparison | غير متحقق. |
+| DoD-12 | ملفات تخطيط موجودة؛ لا benchmarks تشغيلية | لا أدلة إعداد/قياس M1 ولا نتائج benchmark. |
+
+هذه المصفوفة تسجل أدلة موضعية لا اعتمادًا؛ تتغير مع التحقق التنفيذي ولا تحول توجيهات المنتج إلى نتائج. لا تعدل الخريطة المخططة أعلاه أو تقفل T00/T01/T02.
+
+## 9. ترتيب الدمج وإغلاق المشروع
 
 `T00 → T01 → T02 → (T03 → T04 || T05) → (T06 || T07) → T08 → T09 → T10` ثم `(T11 || T12 || T13 || T14 || T17)`، و`T11/T12/T13 → T15 → T16`، ثم `T16/T17 → (T18 || T19) → T20 → T21 → T22`. الإضافات T24 بعد T10/T14 وعقود آثارها، T25 بعد T09/T13 وعقد الأوامر، T26 مع T12؛ تكاملها واختباراتها ضمن دفعة M1 المعنية قبل إغلاق أدلتها، دون ادعاء إنجاز. الرمز `||` مشروط باختلاف الملفات والعقود؛ ترتيب dependencies في الصفوف هو الحاكم.
 
