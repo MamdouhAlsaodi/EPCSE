@@ -644,3 +644,5 @@ export function runTwoCityScenario(): TwoCityReport {
 
 export { runMultiCityRerouteDemo } from './multicity-reroute.js';
 export type { MultiCityRerouteReport } from './multicity-reroute.js';
+export { runInitialTwoCities } from './initial-two-cities.js';
+export type { InitialTwoCitiesReport } from './initial-two-cities.js';
