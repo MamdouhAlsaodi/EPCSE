@@ -22,8 +22,16 @@ export interface PaidShipmentCoordinatorInput {
   readonly network: RouteNetwork;
 }
 
+export interface PaidShipmentRerouteInput {
+  readonly shipmentId: string;
+  readonly routeId: string;
+  /** Explicit additional settlement amount. */
+  readonly payment: number;
+}
+
 export interface PaidShipmentCoordinator {
   depart(input: PaidShipmentInput): PaidShipmentReceipt;
+  reroute(input: PaidShipmentRerouteInput): void;
 }
 
 export function createPaidShipmentCoordinator(
@@ -62,8 +70,19 @@ export function createPaidShipmentCoordinator(
       if (buyerAccountId === sellerAccountId) {
         throw new RangeError('payer and carrier accounts must be distinct');
       }
+      if (
+        !inventoryParticipant.isCurrent() ||
+        !moneyParticipant.isCurrent() ||
+        !routeParticipant.isCurrent()
+      ) {
+        throw new TypeError('coordinator participants are no longer current');
+      }
       const sourceCityId = routeParticipant.getRouteSource(shipment.routeId);
-      const prepareNetwork = routeParticipant.prepareDeparture(shipment);
+      const prepareNetwork = routeParticipant.prepareDeparture(shipment, {
+        buyerAccountId,
+        sellerAccountId,
+        originalPayment: payment,
+      });
       const prepareInventory = inventoryParticipant.prepareTransfer(
         sourceCityId,
         routeParticipant.transitOwnerId,
@@ -79,6 +98,27 @@ export function createPaidShipmentCoordinator(
       prepareMoney();
       prepareNetwork();
       return { shipment, payment };
+    },
+    reroute: (rerouteInput) => {
+      const shipmentId = rerouteInput.shipmentId;
+      const routeId = rerouteInput.routeId;
+      const payment = rerouteInput.payment;
+      if (
+        !inventoryParticipant.isCurrent() ||
+        !moneyParticipant.isCurrent() ||
+        !routeParticipant.isCurrent()
+      ) {
+        throw new TypeError('coordinator participants are no longer current');
+      }
+      const prepareNetwork = routeParticipant.prepareReroute(shipmentId, routeId);
+      const accounts = routeParticipant.getPaidAccounts(shipmentId);
+      const prepareMoney = moneyParticipant.prepareTransfer(
+        accounts.buyerAccountId,
+        accounts.sellerAccountId,
+        payment,
+      );
+      prepareMoney();
+      prepareNetwork();
     },
   };
 }

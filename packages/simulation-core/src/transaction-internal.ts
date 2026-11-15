@@ -55,10 +55,23 @@ export interface MarketTransactionParticipant {
 }
 
 export interface RouteTransactionParticipant {
+  isCurrent(): boolean;
   readonly inventory: object;
   readonly transitOwnerId: string;
   getRouteSource(routeId: string): string;
-  prepareDeparture(shipment: ShipmentInput): () => void;
+  getPaidAccounts(shipmentId: string): {
+    readonly buyerAccountId: string;
+    readonly sellerAccountId: string;
+  };
+  prepareDeparture(
+    shipment: ShipmentInput,
+    provenance?: {
+      readonly buyerAccountId: string;
+      readonly sellerAccountId: string;
+      readonly originalPayment: number;
+    },
+  ): () => void;
+  prepareReroute(shipmentId: string, routeId: string): () => void;
 }
 
 export interface TransactionParticipants {
