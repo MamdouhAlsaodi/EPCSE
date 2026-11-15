@@ -1,10 +1,21 @@
 #!/usr/bin/env node
 import { pathToFileURL } from 'node:url';
-import { runTwoCityScenario, scenarioStatus } from '@epcse/scenarios';
+import { runMultiCityRerouteDemo, runTwoCityScenario, scenarioStatus } from '@epcse/scenarios';
 import { engineStatus } from '@epcse/simulation-core';
 
 /** Print a deterministic scripted demonstration and accurately scoped status. */
-export function run(): string[] {
+export function run(args: readonly string[] = process.argv.slice(2)): string[] {
+  if (args.includes('--reroute-demo')) {
+    const report = runMultiCityRerouteDemo();
+    return [
+      report.title,
+      `Cities: ${report.cities.join(', ')}; routes: ${report.routes.join(', ')}`,
+      `Shipment ${report.shipment.shipmentId}: ${report.shipment.departureTick} -> ${report.shipment.arrivalTick}, ${report.shipment.status}; delivered at ${report.shipment.deliveredCityId} (original destination ${report.shipment.originalDestinationCityId})`,
+      `Payments: initial ${report.payments.initial}, extra ${report.payments.extra}; balances buyer/carrier ${report.balances.buyer}/${report.balances.carrier}`,
+      `Destination inventory: ${JSON.stringify(report.destinationInventory)}; conservation: ${JSON.stringify(report.conservation)}`,
+      report.disclaimer,
+    ];
+  }
   const report = runTwoCityScenario();
   return [
     'EPCSE CLI - Economic, Political & Civilization Simulation Engine',
