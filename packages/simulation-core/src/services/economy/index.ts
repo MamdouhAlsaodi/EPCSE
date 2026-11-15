@@ -9,6 +9,7 @@ import {
 } from '../accounting/index.js';
 import type { CommodityQuantity, MoneyUnit } from '../../models/units.js';
 import { hash } from '../../shared/canonical.js';
+import { getPoliticsImpactPlan } from '../politics/index.js';
 
 export interface LocalEconomyProducer {
   id: string;
@@ -334,7 +335,15 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
         result.stopped = 'closed';
         continue;
       }
-      const capacity = firm?.capacity ?? p.maxBatches;
+      const impact = getPoliticsImpactPlan(draft, p.id);
+      const capacity = checkedNumber(
+        (BigInt(firm?.capacity ?? p.maxBatches) * BigInt(impact?.capacityBps ?? 10000)) / 10000n,
+        'political capacity',
+      );
+      const wagePerBatch = checkedNumber(
+        (BigInt(p.wagePerBatch) * BigInt(10000 + (impact?.wageIncreaseBps ?? 0)) + 9999n) / 10000n,
+        'political wage',
+      );
       const recipe = a.recipes.find((r) => r.id === p.recipeId)!;
       const eligible = cohorts.filter(
         (c) => cohortCity(draft, c) === p.cityId && eligibleForProducer(draft, c, p),
@@ -352,7 +361,7 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
       let batches = Math.min(
         capacity,
         Math.floor(availableWorkers / p.laborPerBatch),
-        p.wagePerBatch ? Math.floor(liquidity / p.wagePerBatch) : capacity,
+        wagePerBatch ? Math.floor(liquidity / wagePerBatch) : capacity,
         ...recipe.inputs.map((line) =>
           Math.floor(stock(a, p.ownerId, line.commodity) / line.quantity),
         ),
@@ -372,7 +381,7 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
             ? 'no-workers'
             : recipe.inputs.some((line) => stock(a, p.ownerId, line.commodity) < line.quantity)
               ? 'missing-inputs'
-              : liquidity < p.wagePerBatch
+              : liquidity < wagePerBatch
                 ? 'no-liquidity'
                 : 'capacity-or-headroom'
           : null;
@@ -400,10 +409,10 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
             return { cohort: c, workers: allocated };
           })
           .filter((allocation) => allocation.workers > 0);
-        if (p.wagePerBatch)
+        if (wagePerBatch)
           allocations.forEach((allocation) => {
             const share = Number(
-              (BigInt(p.wagePerBatch) * BigInt(allocation.workers)) / BigInt(p.laborPerBatch),
+              (BigInt(wagePerBatch) * BigInt(allocation.workers)) / BigInt(p.laborPerBatch),
             );
             if (share > 0) {
               ops.push({
