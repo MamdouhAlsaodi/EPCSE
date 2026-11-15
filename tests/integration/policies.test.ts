@@ -1332,6 +1332,101 @@ describe('government and bilateral policy integration', () => {
     expect(taxCollected).toBeGreaterThan(0);
   });
 
+  it('applies an advisor-style city-scoped local tax only to purchases in that city', () => {
+    const engine = createEngine({ initialState: {} }, 90);
+    registerGovernment(engine, {
+      kingdoms: [{ ...kingdoms[0]!, recipients: [...kingdoms[0]!.recipients] }, kingdoms[1]!],
+      cityKingdomIds: { 'north-city': 'north', 'north-east': 'north', 'south-city': 'south' },
+    });
+    registerLocalEconomy(engine, {
+      currency: { id: 'coin', unit: 'coin', scale: 0 },
+      commodities: [{ id: 'grain', unit: 'unit', scale: 0 }],
+      owners: ['north', 'south', 'family-a', 'family-b', 'farm'],
+      accounts: [
+        { id: 'north-cash', ownerId: 'north', openingBalance: 10 },
+        { id: 'north-households', ownerId: 'north', openingBalance: 0 },
+        { id: 'south-cash', ownerId: 'south', openingBalance: 0 },
+        { id: 'family-a-cash', ownerId: 'family-a', openingBalance: 10 },
+        { id: 'family-b-cash', ownerId: 'family-b', openingBalance: 10 },
+        { id: 'farm-cash', ownerId: 'farm', openingBalance: 0 },
+      ],
+      stock: [{ ownerId: 'farm', commodity: 'grain', quantity: 4 }],
+      recipes: [],
+      producers: [],
+      cohorts: [
+        {
+          id: 'family-a',
+          cityId: 'north-city',
+          ownerId: 'family-a',
+          accountId: 'family-a-cash',
+          workersAvailable: 0,
+          desiredNeeds: { grain: 1 },
+        },
+        {
+          id: 'family-b',
+          cityId: 'north-east',
+          ownerId: 'family-b',
+          accountId: 'family-b-cash',
+          workersAvailable: 0,
+          desiredNeeds: { grain: 1 },
+        },
+      ],
+      sellers: [
+        {
+          cityId: 'north-city',
+          commodity: 'grain',
+          ownerId: 'farm',
+          accountId: 'farm-cash',
+          minPrice: 2,
+          maxPrice: 2,
+          openingPrice: 2,
+        },
+        {
+          cityId: 'north-east',
+          commodity: 'grain',
+          ownerId: 'farm',
+          accountId: 'farm-cash',
+          minPrice: 2,
+          maxPrice: 2,
+          openingPrice: 2,
+        },
+      ],
+    });
+    engine.step();
+    engine.submit({
+      commandId: 'north-city-only-tax',
+      type: 'government.policy',
+      requestedTick: 2,
+      payload: {
+        variant: 'local-purchase-tax',
+        kingdomId: 'north',
+        governmentId: 'north',
+        policyId: 'north-city-tax',
+        cityId: 'north-city',
+        rateBps: 5000,
+        incidence: 'buyer',
+        effectiveTick: 2,
+        expiryTick: 2,
+      },
+    });
+    engine.step();
+    const accounting = engine.getState().domain.accounting as {
+      accounts: Array<{ id: string; balance: number }>;
+      journal: Array<{ causeId: string }>;
+    };
+    expect(accounting.accounts.find((account) => account.id === 'north-cash')?.balance).toBe(11);
+    expect(
+      accounting.journal.some(
+        (entry) => entry.causeId === 'government:north-city-tax:purchase:family-a:grain',
+      ),
+    ).toBe(true);
+    expect(
+      accounting.journal.some(
+        (entry) => entry.causeId === 'government:north-city-tax:purchase:family-b:grain',
+      ),
+    ).toBe(false);
+  });
+
   it('does not tax local purchases outside the configured government jurisdiction', () => {
     const engine = createEngine({ initialState: {} }, 91);
     registerGovernment(engine, {

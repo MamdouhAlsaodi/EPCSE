@@ -6,6 +6,8 @@ export interface EngineCommand {
   readonly type: string;
   readonly payload: unknown;
   readonly sequence?: number;
+  /** Simulation provenance only; this is not an authenticated identity. */
+  readonly actor?: { readonly kind: 'player' | 'advisor' | 'ai'; readonly id: string };
 }
 export interface CommandReceipt {
   readonly receiptVersion: 1;
