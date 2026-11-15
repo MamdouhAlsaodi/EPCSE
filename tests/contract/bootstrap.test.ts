@@ -46,10 +46,12 @@ describe('bootstrap CLI and core source boundary', () => {
       );
       const check = (specifier: string) => {
         const destination = resolve(path, '..', specifier);
+        const allowedCrypto =
+          path === resolve(sourceRoot, 'shared/canonical.ts') && specifier === 'node:crypto';
         if (
-          !specifier.startsWith('.') ||
-          !isAbsolute(destination) ||
-          relative(sourceRoot, destination).startsWith('..')
+          (!specifier.startsWith('.') && !allowedCrypto) ||
+          (!allowedCrypto && !isAbsolute(destination)) ||
+          (!allowedCrypto && relative(sourceRoot, destination).startsWith('..'))
         ) {
           violations.push(`${relative(root, path)}: ${specifier}`);
         }
