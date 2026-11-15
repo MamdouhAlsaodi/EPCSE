@@ -19,6 +19,8 @@ export interface LocalEconomyProducer {
   laborPerBatch: number;
   maxBatches: number;
   wagePerBatch: number;
+  /** When configured, workers must have at least these skill levels. */
+  requiredSkills?: Record<string, number>;
 }
 export interface LocalEconomyCohort {
   id: string;
@@ -46,7 +48,19 @@ export interface LocalEconomyConfig extends Omit<AccountingConfig, 'stock'> {
 type EconomyState = {
   version: 1;
   configDigest: string;
-  producers: Record<string, { stopped: string | null; batches: number; employed: number }>;
+  configCohorts: Record<string, { cityId: string }>;
+  producers: Record<
+    string,
+    {
+      stopped: string | null;
+      batches: number;
+      employed: number;
+      cityId: string;
+      maxBatches: number;
+      laborPerBatch: number;
+      requiredSkills: Record<string, number>;
+    }
+  >;
   cohorts: Record<
     string,
     {
@@ -86,6 +100,44 @@ function account(state: AccountingState, id: string) {
   const found = state.accounts.find((x) => x.id === id);
   if (!found) throw new RangeError(`unknown account ${id}`);
   return found;
+}
+function liveCohort(draft: Record<string, unknown>, cohort: LocalEconomyCohort) {
+  const cities = draft.cities as
+    | {
+        cohorts?: Record<
+          string,
+          {
+            linkedEconomyCohortId: string;
+            population: number;
+            cityId: string;
+            dynamicNeeds: Record<string, number>;
+          }
+        >;
+      }
+    | undefined;
+  return Object.values(cities?.cohorts ?? {}).find((x) => x.linkedEconomyCohortId === cohort.id);
+}
+function workerCount(draft: Record<string, unknown>, cohort: LocalEconomyCohort): number {
+  return liveCohort(draft, cohort)?.population ?? cohort.workersAvailable;
+}
+function eligibleForProducer(
+  draft: Record<string, unknown>,
+  cohort: LocalEconomyCohort,
+  producer: LocalEconomyProducer,
+): boolean {
+  const live = liveCohort(draft, cohort) as { skills?: Record<string, number> } | undefined;
+  return Object.entries(producer.requiredSkills ?? {}).every(
+    ([skill, level]) => (live?.skills?.[skill] ?? 0) >= level,
+  );
+}
+function cohortCity(draft: Record<string, unknown>, cohort: LocalEconomyCohort): string {
+  return liveCohort(draft, cohort)?.cityId ?? cohort.cityId;
+}
+function cohortNeeds(
+  draft: Record<string, unknown>,
+  cohort: LocalEconomyCohort,
+): Record<string, number> {
+  return liveCohort(draft, cohort)?.dynamicNeeds ?? cohort.desiredNeeds;
 }
 function stock(state: AccountingState, owner: string, commodity: string) {
   return (
@@ -129,7 +181,10 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
         p.wagePerBatch < 0 ||
         !Number.isSafeInteger(p.maxBatches) ||
         p.maxBatches < 0 ||
-        p.maxBatches > MAX_BATCHES,
+        p.maxBatches > MAX_BATCHES ||
+        Object.entries(p.requiredSkills ?? {}).some(
+          ([skill, level]) => !skill.trim() || !Number.isSafeInteger(level) || level < 0,
+        ),
     )
   )
     throw new RangeError(`producer values invalid; maxBatches is limited to ${MAX_BATCHES}`);
@@ -207,8 +262,20 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
   const initial: EconomyState = {
     version: 1,
     configDigest,
+    configCohorts: Object.fromEntries(cohorts.map((c) => [c.id, { cityId: c.cityId }])),
     producers: Object.fromEntries(
-      producers.map((p) => [p.id, { stopped: null, batches: 0, employed: 0 }]),
+      producers.map((p) => [
+        p.id,
+        {
+          stopped: null,
+          batches: 0,
+          employed: 0,
+          cityId: p.cityId,
+          maxBatches: p.maxBatches,
+          laborPerBatch: p.laborPerBatch,
+          requiredSkills: { ...(p.requiredSkills ?? {}) },
+        },
+      ]),
     ),
     cohorts: Object.fromEntries(
       cohorts.map((c) => [
@@ -243,15 +310,18 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
     const e = draft.economy as EconomyState;
     let a = draft.accounting as AccountingState;
     const employedByCohort = new Map<string, number>();
+    const wageIncomeByCohort = new Map<string, number>();
     for (const p of producers) {
       const result = e.producers[p.id]!;
       result.batches = 0;
       result.employed = 0;
       result.stopped = null;
       const recipe = a.recipes.find((r) => r.id === p.recipeId)!;
-      const eligible = cohorts.filter((c) => c.cityId === p.cityId);
+      const eligible = cohorts.filter(
+        (c) => cohortCity(draft, c) === p.cityId && eligibleForProducer(draft, c, p),
+      );
       const labor = checkedNumber(
-        eligible.reduce((sum, c) => sum + BigInt(c.workersAvailable), 0n),
+        eligible.reduce((sum, c) => sum + BigInt(workerCount(draft, c)), 0n),
         'worker count',
       );
       const workers = checkedNumber(
@@ -303,7 +373,7 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
           .map((c) => {
             const allocated = Math.min(
               remainingWorkers,
-              c.workersAvailable - (employedByCohort.get(c.id) ?? 0),
+              workerCount(draft, c) - (employedByCohort.get(c.id) ?? 0),
             );
             remainingWorkers -= allocated;
             if (allocated > 0)
@@ -316,7 +386,7 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
             const share = Number(
               (BigInt(p.wagePerBatch) * BigInt(allocation.workers)) / BigInt(p.laborPerBatch),
             );
-            if (share > 0)
+            if (share > 0) {
               ops.push({
                 type: 'payment',
                 fromAccountId: p.accountId,
@@ -324,6 +394,14 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
                 amount: money(a, share),
                 causeId: `wage:${p.id}:${i}:${allocation.cohort.id}`,
               });
+              wageIncomeByCohort.set(
+                allocation.cohort.id,
+                checkedNumber(
+                  BigInt(wageIncomeByCohort.get(allocation.cohort.id) ?? 0) + BigInt(share),
+                  'cohort wages',
+                ),
+              );
+            }
           });
         a = applyAccountingTransaction(
           a,
@@ -334,6 +412,28 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
         result.employed += p.laborPerBatch;
       }
     }
+    const cityState = draft.cities as
+      | {
+          cohorts?: Record<
+            string,
+            {
+              linkedEconomyCohortId: string;
+              population: number;
+              employment: number;
+              unemployment: number;
+              incomeThisTick: number;
+            }
+          >;
+        }
+      | undefined;
+    for (const cityCohort of Object.values(cityState?.cohorts ?? {})) {
+      cityCohort.employment = Math.min(
+        cityCohort.population,
+        employedByCohort.get(cityCohort.linkedEconomyCohortId) ?? 0,
+      );
+      cityCohort.unemployment = cityCohort.population - cityCohort.employment;
+      cityCohort.incomeThisTick = wageIncomeByCohort.get(cityCohort.linkedEconomyCohortId) ?? 0;
+    }
     draft.accounting = a;
   });
   engine.registerPhaseSystem('market', 'local-economy:quote', (draft) => {
@@ -343,8 +443,8 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
       const k = key(s.cityId, s.commodity),
         supply = stock(a, s.ownerId, s.commodity),
         demand = cohorts
-          .filter((c) => c.cityId === s.cityId)
-          .reduce((sum, c) => sum + BigInt(c.desiredNeeds[s.commodity] ?? 0), 0n);
+          .filter((c) => cohortCity(draft, c) === s.cityId)
+          .reduce((sum, c) => sum + BigInt(cohortNeeds(draft, c)[s.commodity] ?? 0), 0n);
       const old = e.sellers[k]!.price;
       let price = old,
         reason = 'balanced';
@@ -372,9 +472,9 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
     let a = draft.accounting as AccountingState;
     const e = draft.economy as EconomyState;
     for (const c of cohorts)
-      for (const [commodity, desired] of Object.entries(c.desiredNeeds)) {
+      for (const [commodity, desired] of Object.entries(cohortNeeds(draft, c))) {
         const state = e.cohorts[c.id]!;
-        const seller = e.sellers[key(c.cityId, commodity)];
+        const seller = e.sellers[key(cohortCity(draft, c), commodity)];
         if (!seller) {
           state.unmet[commodity] = desired;
           state.cumulativeUnmet[commodity] = checkedNumber(
@@ -384,7 +484,7 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
           state.reasons[commodity] = 'no-seller';
           continue;
         }
-        const price = e.quotes[key(c.cityId, commodity)]!.price;
+        const price = e.quotes[key(cohortCity(draft, c), commodity)]!.price;
         const available = stock(a, seller.ownerId, commodity),
           budget = account(a, c.accountId).balance;
         const bought = Math.min(desired, available, Math.floor(budget / price));
