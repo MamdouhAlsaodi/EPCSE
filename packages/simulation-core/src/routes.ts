@@ -1,6 +1,13 @@
 import type { Commodity } from './commodity.js';
 import type { Inventory } from './inventory.js';
 import {
+  activeOutwardElapsedTicks,
+  isPaidObstructionRerouteEligible,
+  pauseRouteShipment,
+  returnDueTick,
+  resumeRouteShipment,
+} from './services/logistics/route-rules.js';
+import {
   getTransactionParticipant,
   registerTransactionParticipant,
 } from './transaction-internal.js';
@@ -493,12 +500,19 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
     if (closedRoutes.has(routeId) || blockedRoutes.has(routeId) || attackedRoutes.has(routeId))
       throw new RangeError(`alternative route is not open: ${routeId}`);
     if (
-      alternative.sourceCityId !== originalRoute.sourceCityId ||
-      alternative.destinationCityId === originalRoute.destinationCityId
+      !isPaidObstructionRerouteEligible({
+        isInTransit: shipment.status === 'in-transit',
+        isBlocked: blockedRoutes.has(shipment.routeId),
+        hasBlockTick: shipment.blockedAtTick !== undefined,
+        isPaid: shipment.buyerAccountId !== undefined && shipment.sellerAccountId !== undefined,
+        alreadyRerouted: shipment.reroutedFromRouteId !== undefined,
+        sameOrigin: alternative.sourceCityId === originalRoute.sourceCityId,
+        differentDestination: alternative.destinationCityId !== originalRoute.destinationCityId,
+        alternateRouteOpen:
+          !closedRoutes.has(routeId) && !blockedRoutes.has(routeId) && !attackedRoutes.has(routeId),
+      })
     )
-      throw new RangeError(
-        'alternative route must start at the original source and reach another city',
-      );
+      throw new RangeError('alternative route is not eligible for paid obstruction reroute');
     const remaining = shipment.pausedRemainingTicks!;
     if (
       !Number.isSafeInteger(remaining) ||
@@ -553,7 +567,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       if (!closedRoutes.has(routeId)) {
         shipments = shipments.map((shipment) =>
           shipment.routeId === routeId && shipment.status === 'in-transit'
-            ? { ...shipment, pausedRemainingTicks: shipment.arrivalTick - tick }
+            ? pauseRouteShipment(shipment, tick)
             : shipment,
         );
         closedRoutes.add(routeId);
@@ -573,7 +587,11 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
         const originalRoute = routes.get(shipment.reroutedFromRouteId)!;
         const selectedElapsed =
           shipment.rerouteRemainingTicks! + route.travelTicks - (shipment.arrivalTick - tick);
-        return originalRoute.travelTicks - shipment.rerouteRemainingTicks! + selectedElapsed;
+        return activeOutwardElapsedTicks(
+          originalRoute.travelTicks,
+          shipment.rerouteRemainingTicks!,
+          selectedElapsed,
+        );
       };
       for (const shipment of outbound) {
         const elapsed = elapsedOutbound(shipment);
@@ -617,7 +635,9 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       shipments = shipments.map((s) => {
         if (!outbound.includes(s)) return s;
         const elapsed = elapsedOutbound(s);
-        const due = tick + elapsed;
+        const due = returnDueTick(tick, elapsed);
+        if (due === undefined)
+          throw new RangeError('return due tick would exceed Number.MAX_SAFE_INTEGER');
         return elapsed === 0
           ? { ...s, status: 'returned', attackTick: tick, returnDueTick: due }
           : { ...s, status: 'returning', attackTick: tick, returnDueTick: due };
@@ -637,11 +657,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
       if (!blockedRoutes.has(routeId)) {
         shipments = shipments.map((shipment) =>
           shipment.routeId === routeId && shipment.status === 'in-transit'
-            ? {
-                ...shipment,
-                pausedRemainingTicks: shipment.arrivalTick - tick,
-                blockedAtTick: tick,
-              }
+            ? { ...pauseRouteShipment(shipment, tick), blockedAtTick: tick }
             : shipment,
         );
         blockedRoutes.add(routeId);
@@ -661,10 +677,12 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
         }
         shipments = shipments.map((shipment) => {
           if (shipment.routeId !== routeId || shipment.status !== 'in-transit') return shipment;
-          const active = { ...shipment };
-          delete active.pausedRemainingTicks;
-          delete active.blockedAtTick;
-          return { ...active, arrivalTick: tick + shipment.pausedRemainingTicks! };
+          const paused = { ...shipment };
+          delete paused.blockedAtTick;
+          return resumeRouteShipment(
+            paused as typeof shipment & { pausedRemainingTicks: number },
+            tick,
+          );
         });
         blockedRoutes.delete(routeId);
       }
@@ -683,7 +701,7 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
         );
       const route = routes.get(shipment.routeId)!;
       const remaining = shipment.pausedRemainingTicks!;
-      const elapsed = route.travelTicks - remaining;
+      const elapsed = activeOutwardElapsedTicks(route.travelTicks, remaining, 0);
       if (
         !Number.isSafeInteger(elapsed) ||
         elapsed < 0 ||
@@ -744,8 +762,10 @@ export function createRouteNetwork(input: RouteNetworkInput): RouteNetwork {
         }
         shipments = shipments.map((shipment) => {
           if (shipment.routeId !== routeId || shipment.status !== 'in-transit') return shipment;
-          const { pausedRemainingTicks, ...active } = shipment;
-          return { ...active, arrivalTick: tick + pausedRemainingTicks! };
+          return resumeRouteShipment(
+            shipment as typeof shipment & { pausedRemainingTicks: number },
+            tick,
+          );
         });
         closedRoutes.delete(routeId);
       }
