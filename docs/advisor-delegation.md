@@ -1,0 +1,22 @@
+# T25 — Advisor delegation contract (SC-19)
+
+This is the approved simulation contract and implementation boundary for T25. It is not an authentication design, security signoff, or SC/M1 acceptance claim. See the approved Q06 record in [decisions.md](decisions.md#t25--sc-19--قرار-q06-المعتمد-تفويض-المستشار) and the broader [government policy contract](government-policies.md).
+
+## Authority and scope
+
+- Advisor delegation is disabled unless its service is registered with trusted `GovernmentConfig`; registration is explicit and the service does not control, delegate for, or take over AI kingdoms.
+- The player controls their configured player kingdom. A grant is tied to that kingdom and one advisor ID; its permissions are an explicit allowlist of one or more current `government.policy` variants: `transfer`, `food-subsidy`, `local-purchase-tax`, `import-tariff`, `trade-restriction`, and `capital-investment`.
+- Each permission contains exact, non-wildcard scope values. Transfer grants name recipient kingdom/owner/account; food grants additionally name the commodity; import tariffs and restrictions name the import kingdom, route, and commodity; capital investment names exactly one city or route; local-purchase tax names one city present in trusted `cityKingdomIds` for the player kingdom. A variant may not be omitted or broadened through the legacy `government.policy` envelope. Amount/cost bounds are positive integer maxima; local-tax grants require a positive `maxRateBps` no greater than 10,000. `trade-restriction` has no amount and therefore has no `maxAmount`.
+- Submission validates actor provenance, player-kingdom target, current non-revoked grant, variant, exact scope, and bound. Existing non-advisor player `government.policy` behavior is unchanged. `actor` is deterministic simulation provenance only; a caller-controlled actor field is not authentication and provides no external identity boundary (T18 remains later work).
+
+## Scheduling, revocation, and receipts
+
+Grant and revoke are ordinary deterministic engine commands. They execute at their requested tick in queue order `(requestedTick, sequence)`. A grant is not active before it is applied. A policy command accepted at submit is authorized then; if it remains queued when a later revoke executes, it still executes on its accepted schedule. Revocation blocks only later submission attempts. It does not cancel an accepted queued command, erase historical records, or reverse a completed effect.
+
+A rejected advisor policy is a submit-time, auditable rejection: it is stored in `domain.advisor.audit` and in the versioned command receipt, is included in snapshots/replay, and is returned identically for a retry with the same command ID/content. Rejected submissions do not enter the execution queue or consume a sequence. A conflicting reuse of the ID remains an engine conflict. Successful scheduled commands are represented by the engine's versioned receipt/event and the resulting domain policy/accounting state; grant/revoke actions are also in the advisor audit trail. No rejected command changes policy/accounting state.
+
+## Snapshot and limits
+
+Advisor state has its own version and is part of the engine domain snapshot. Restore checks grant structure, explicit scope, bounds, sequence/receipt consistency, and registered domain invariants before replacing live state. Tampered wildcard grants are invalid. Restoring a valid queued policy retains its prior submit-time authorization; restore does not re-check against grants that may since have been revoked.
+
+This service does not add login, user identity, sessions, API authorization, or trusted actor provenance. A caller that can invoke the simulation core can assert an actor value; this is simulation provenance only, not an authentication boundary (T18 remains later work). Legacy player `government.policy` commands may omit `actor` for compatibility; this core capability is not authorization. Advisor grant/revoke require a simulated player actor and target a player kingdom from registration-time trusted configuration. The six policy variants remain allowlisted; no wildcard or AI delegation is introduced. A city-scoped local tax affects only purchases by buyers in that configured city; legacy tax commands without `cityId` retain jurisdiction-wide behavior. Focused implementation/tests do not establish complete acceptance of broader SC-19 or M1.

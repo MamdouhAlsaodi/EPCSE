@@ -26,6 +26,24 @@ export interface Engine {
   snapshotText(): string;
   restore(snapshot: EngineSnapshot | string): void;
   registerCommandHandler(type: string, handler: CommandHandler): void;
+  registerCommandSubmitValidator(
+    validator: (
+      command: EngineCommand,
+      domain: Readonly<Record<string, unknown>>,
+    ) => string | undefined,
+  ): void;
+  registerAdvisorPolicySubmitValidator(
+    validator: (
+      command: EngineCommand,
+      domain: Readonly<Record<string, unknown>>,
+    ) => string | undefined,
+  ): void;
+  registerSubmitRejectionAudit(
+    audit: (domain: Record<string, unknown>, command: EngineCommand, code: string) => void,
+  ): void;
+  registerSubmitAcceptanceAudit(
+    audit: (domain: Record<string, unknown>, command: EngineCommand) => void,
+  ): void;
   registerPhaseSystem(
     phase: PhaseName,
     name: string,
@@ -72,6 +90,18 @@ export function createEngine(config: EngineConfig, seed: number): Engine {
     envelopes = new Map<string, EngineCommand>(),
     eventLog: EngineEvent[] = [];
   const handlers = new Map<string, CommandHandler>();
+  const submitValidators: Array<
+    (command: EngineCommand, domain: Readonly<Record<string, unknown>>) => string | undefined
+  > = [];
+  const advisorPolicySubmitValidators: Array<
+    (command: EngineCommand, domain: Readonly<Record<string, unknown>>) => string | undefined
+  > = [];
+  const submitRejectionAudits: Array<
+    (domain: Record<string, unknown>, command: EngineCommand, code: string) => void
+  > = [];
+  const submitAcceptanceAudits: Array<
+    (domain: Record<string, unknown>, command: EngineCommand) => void
+  > = [];
   const phaseSystems = new Map<
     PhaseName,
     Map<string, (draft: Record<string, unknown>, drawRandom: () => number) => unknown>
@@ -139,6 +169,26 @@ export function createEngine(config: EngineConfig, seed: number): Engine {
           input.requestedTick < 1
         )
           return reject(input.commandId ?? '', input.requestedTick ?? 0, 'INVALID');
+        if (
+          input.actor !== undefined &&
+          (!input.actor ||
+            typeof input.actor !== 'object' ||
+            Array.isArray(input.actor) ||
+            !['player', 'advisor', 'ai'].includes(input.actor.kind) ||
+            typeof input.actor.id !== 'string' ||
+            !input.actor.id.trim() ||
+            canonical(Object.keys(input.actor).sort()) !== canonical(['id', 'kind']))
+        )
+          return reject(input.commandId, input.requestedTick, 'INVALID');
+        if (
+          input.actor?.kind === 'advisor' &&
+          (input.type !== 'government.policy' || advisorPolicySubmitValidators.length === 0)
+        )
+          return reject(input.commandId, input.requestedTick, 'UNAUTHORIZED');
+        if (input.actor?.kind === 'ai' && input.type === 'government.policy')
+          return reject(input.commandId, input.requestedTick, 'UNAUTHORIZED');
+        if (input.type.startsWith('advisor.') && input.actor?.kind !== 'player')
+          return reject(input.commandId, input.requestedTick, 'UNAUTHORIZED');
         const normalized = cloneJson({
           ...input,
           commandVersion: 1 as const,
@@ -151,6 +201,38 @@ export function createEngine(config: EngineConfig, seed: number): Engine {
             : reject(command.commandId, command.requestedTick, 'DUPLICATE_CONFLICT');
         if (command.requestedTick <= tick)
           return reject(command.commandId, command.requestedTick, 'LATE');
+        const rejection =
+          (normalized.actor?.kind === 'advisor' && normalized.type === 'government.policy'
+            ? advisorPolicySubmitValidators.length === 0
+              ? 'UNAUTHORIZED'
+              : advisorPolicySubmitValidators
+                  .map((validator) => validator(normalized, cloneJson(domain)))
+                  .find(Boolean)
+            : undefined) ??
+          submitValidators
+            .map((validator) => validator(normalized, cloneJson(domain)))
+            .find(Boolean);
+        if (rejection) {
+          const rejected: CommandReceipt = {
+            receiptVersion: 1,
+            commandId: command.commandId,
+            status: 'rejected',
+            requestedTick: command.requestedTick,
+            appliedTick: null,
+            sequence: null,
+            errorCode: rejection,
+          };
+          const auditedDomain = cloneJson(domain);
+          for (const audit of submitRejectionAudits) audit(auditedDomain, normalized, rejection);
+          verifyInvariants(auditedDomain);
+          domain = auditedDomain;
+          envelopes.set(command.commandId, normalized);
+          receiptMap.set(command.commandId, rejected);
+          return cloneJson(rejected);
+        }
+        const auditedDomain = cloneJson(domain);
+        for (const audit of submitAcceptanceAudits) audit(auditedDomain, normalized);
+        domain = auditedDomain;
         const queued: QueuedCommand = { ...normalized, sequence: nextSequence++ };
         envelopes.set(command.commandId, queued);
         queue.push(queued);
@@ -351,9 +433,11 @@ export function createEngine(config: EngineConfig, seed: number): Engine {
           !['queued', 'applied', 'rejected'].includes(receipt.status) ||
           !Number.isSafeInteger(receipt.requestedTick) ||
           receipt.requestedTick < 1 ||
-          !Number.isSafeInteger(receipt.sequence) ||
-          receipt.sequence! < 1 ||
-          receipt.sequence! >= s.nextSequence ||
+          (receipt.sequence !== null &&
+            (!Number.isSafeInteger(receipt.sequence) ||
+              receipt.sequence! < 1 ||
+              receipt.sequence! >= s.nextSequence)) ||
+          (receipt.status !== 'rejected' && receipt.sequence === null) ||
           (receipt.status === 'queued' &&
             (receipt.appliedTick !== null || receipt.errorCode !== null)) ||
           (receipt.status === 'applied' &&
@@ -378,9 +462,10 @@ export function createEngine(config: EngineConfig, seed: number): Engine {
           command.commandVersion !== 1 ||
           typeof command.worldId !== 'string' ||
           !command.worldId ||
-          !Number.isSafeInteger(command.sequence) ||
-          command.sequence! < 1 ||
-          command.sequence! >= s.nextSequence ||
+          (command.sequence !== undefined &&
+            (!Number.isSafeInteger(command.sequence) ||
+              command.sequence! < 1 ||
+              command.sequence! >= s.nextSequence)) ||
           !Number.isSafeInteger(command.requestedTick) ||
           command.requestedTick < 1 ||
           typeof command.type !== 'string' ||
@@ -398,10 +483,16 @@ export function createEngine(config: EngineConfig, seed: number): Engine {
           return (
             !receipt ||
             receipt.requestedTick !== command.requestedTick ||
-            receipt.sequence !== command.sequence
+            receipt.sequence !== (command.sequence ?? null) ||
+            (receipt.sequence === null) !== (command.sequence === undefined) ||
+            (receipt.sequence === null && receipt.status !== 'rejected')
           );
         }) ||
-        new Set(envelopeList.map((command) => command.sequence)).size !== envelopeList.length
+        new Set(
+          envelopeList
+            .map((command) => command.sequence)
+            .filter((sequence) => sequence !== undefined),
+        ).size !== envelopeList.filter((command) => command.sequence !== undefined).length
       )
         throw new TypeError('inconsistent snapshot envelopes and receipts');
       const queuedIds = new Set<string>();
@@ -475,6 +566,24 @@ export function createEngine(config: EngineConfig, seed: number): Engine {
       if (!type || handlers.has(type) || typeof handler !== 'function')
         throw new Error('invalid or duplicate handler');
       handlers.set(type, handler);
+    },
+    registerSubmitAcceptanceAudit(audit) {
+      if (advancing || typeof audit !== 'function') throw new TypeError('invalid submit audit');
+      submitAcceptanceAudits.push(audit);
+    },
+    registerCommandSubmitValidator(validator) {
+      if (advancing || typeof validator !== 'function')
+        throw new TypeError('invalid submit validator');
+      submitValidators.push(validator);
+    },
+    registerAdvisorPolicySubmitValidator(validator) {
+      if (advancing || typeof validator !== 'function')
+        throw new TypeError('invalid advisor policy submit validator');
+      advisorPolicySubmitValidators.push(validator);
+    },
+    registerSubmitRejectionAudit(audit) {
+      if (advancing || typeof audit !== 'function') throw new TypeError('invalid submit audit');
+      submitRejectionAudits.push(audit);
     },
     registerPhaseSystem(phase, name, system) {
       if (advancing) throw new Error('engine mutation is not allowed during a tick');

@@ -98,6 +98,7 @@ export interface LocalPurchaseTaxPolicy {
   readonly variant: 'local-purchase-tax';
   readonly policyId: string;
   readonly governmentId: string;
+  readonly cityId?: string;
   readonly rateBps: number;
   readonly incidence: 'buyer' | 'seller';
   readonly effectiveTick: number;
@@ -822,6 +823,8 @@ export function registerGovernment(engine: Engine, config: GovernmentConfig): vo
         const tax = p as unknown as LocalPurchaseTaxPolicy;
         const now = engine.getState().tick + 1;
         if (
+          (tax.cityId !== undefined &&
+            (!text(tax.cityId) || cityKingdomIds[tax.cityId] !== k.kingdomId)) ||
           !Number.isSafeInteger(tax.rateBps) ||
           tax.rateBps < 1 ||
           tax.rateBps > 10000 ||

@@ -534,6 +534,7 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
                 variant: string;
                 policyId: string;
                 governmentId: string;
+                cityId?: string;
                 rateBps: number;
                 incidence: 'buyer' | 'seller';
                 effectiveTick: number;
@@ -550,6 +551,7 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
           (policy) =>
             policy.variant === 'local-purchase-tax' &&
             policy.governmentId === jurisdiction &&
+            (policy.cityId === undefined || policy.cityId === cohortCity(draft, c)) &&
             tick >= policy.effectiveTick &&
             tick <= policy.expiryTick,
         );
