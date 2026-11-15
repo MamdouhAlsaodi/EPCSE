@@ -388,6 +388,270 @@ describe('route shipments', () => {
     ).toThrow(/route/i);
   });
 
+  it('holds an obstructed shipment across ticks and resumes its exact remaining travel time', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 4 },
+      ],
+    });
+    network.depart({ shipmentId: 'held', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.advanceTick();
+    network.blockRoute('road');
+    network.advanceTick();
+    network.advanceTick();
+    const blockedSnapshot = network.getState();
+    expect(blockedSnapshot).toMatchObject({
+      blockedRouteIds: ['road'],
+      shipments: [{ status: 'in-transit', pausedRemainingTicks: 3 }],
+    });
+    const restoredHold = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: blockedSnapshot.routes,
+      initialState: blockedSnapshot,
+    });
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: blockedSnapshot.routes,
+        initialState: { ...blockedSnapshot, blockedRouteIds: ['road', 'road'] },
+      }),
+    ).toThrow(/blocked route/i);
+    restoredHold.releaseBlock('road');
+    network.releaseBlock('road');
+    network.advanceTick();
+    network.advanceTick();
+    network.advanceTick();
+    expect(network.getState().shipments[0]?.status).toBe('arrived');
+  });
+
+  it('rejects a blocked return snapshot whose active elapsed time is forged', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const route = {
+      routeId: 'road',
+      sourceCityId: 'north',
+      destinationCityId: 'south',
+      travelTicks: 4,
+    };
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [route],
+    });
+    network.depart({ shipmentId: 'return', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.advanceTick();
+    network.blockRoute('road');
+    network.advanceTick();
+    const snapshot = network.getState();
+    const forged = {
+      ...snapshot,
+      shipments: snapshot.shipments.map((shipment) => {
+        const outbound = { ...shipment };
+        delete outbound.pausedRemainingTicks;
+        return {
+          ...outbound,
+          status: 'returning' as const,
+          blockReturnTick: snapshot.tick,
+          blockReturnElapsedTicks: 2,
+          returnDueTick: snapshot.tick + 2,
+        };
+      }),
+    };
+
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: [route],
+        initialState: forged,
+      }),
+    ).toThrow(/shipment/i);
+    expect(inventory.getState().balances).toContainEqual({
+      ownerId: 'transit',
+      commodity: 'grain',
+      quantity: 1,
+    });
+  });
+
+  it('starts the full return journey only when a held shipment chooses return', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 4 },
+      ],
+    });
+    network.depart({ shipmentId: 'held-return', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.advanceTick();
+    network.blockRoute('road');
+    network.advanceTick();
+    network.advanceTick();
+    network.advanceTick();
+    const returnedChoice = network.returnBlockedShipment('held-return');
+    expect(returnedChoice.shipments[0]).toMatchObject({
+      status: 'returning',
+      blockedAtTick: 1,
+      blockReturnTick: 4,
+      blockReturnElapsedTicks: 1,
+      returnDueTick: 5,
+    });
+    expect(inventory.getState().balances).toContainEqual({
+      ownerId: 'transit',
+      commodity: 'grain',
+      quantity: 1,
+    });
+    network.advanceTick();
+    expect(network.getState().shipments[0]?.status).toBe('returned');
+  });
+
+  it('returns one blocked shipment after active outbound time and keeps another held', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 2 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        {
+          routeId: 'road',
+          sourceCityId: 'north',
+          destinationCityId: 'south',
+          travelTicks: 4,
+          capacity: 2,
+        },
+      ],
+    });
+    network.depart({ shipmentId: 'return', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.depart({ shipmentId: 'hold', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.advanceTick();
+    network.blockRoute('road');
+    network.advanceTick();
+    network.advanceTick();
+    network.returnBlockedShipment('return');
+    network.releaseBlock('road');
+    expect(() =>
+      network.depart({
+        shipmentId: 'before-return',
+        routeId: 'road',
+        commodity: 'grain',
+        quantity: 1,
+      }),
+    ).toThrow(/capacity/);
+    expect(network.getState().shipments).toMatchObject([
+      { status: 'returning', blockReturnElapsedTicks: 1, returnDueTick: 4 },
+      { status: 'in-transit', arrivalTick: 6 },
+    ]);
+    network.advanceTick();
+    expect(network.getState().shipments[0]?.status).toBe('returned');
+    expect(network.getState().shipments[1]?.status).toBe('in-transit');
+    network.depart({
+      shipmentId: 'after-return',
+      routeId: 'road',
+      commodity: 'grain',
+      quantity: 1,
+    });
+    expect(network.getState().shipments[2]).toMatchObject({ status: 'in-transit', arrivalTick: 8 });
+  });
+
+  it('returns after closure and obstruction using active outbound time and restores after release', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const route = {
+      routeId: 'road',
+      sourceCityId: 'north',
+      destinationCityId: 'south',
+      travelTicks: 4,
+    };
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [route],
+    });
+    network.depart({ shipmentId: 'return', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.advanceTick();
+    network.closeRoute('road');
+    network.advanceTick();
+    network.advanceTick();
+    network.openRoute('road');
+    network.advanceTick();
+    network.blockRoute('road');
+    network.advanceTick();
+    network.advanceTick();
+    network.returnBlockedShipment('return');
+    network.releaseBlock('road');
+    const snapshot = network.getState();
+    expect(snapshot.shipments[0]).toMatchObject({
+      blockReturnTick: 6,
+      blockReturnElapsedTicks: 2,
+      returnDueTick: 8,
+    });
+    const restored = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [route],
+      initialState: snapshot,
+    });
+    restored.advanceTick();
+    expect(restored.getState().shipments[0]?.status).toBe('returning');
+    restored.advanceTick();
+    expect(restored.getState().shipments[0]?.status).toBe('returned');
+    expect(inventory.getState().balances).toEqual([
+      { ownerId: 'north', commodity: 'grain', quantity: 1 },
+    ]);
+  });
+
+  it('returns a zero-elapsed obstruction shipment immediately and rejects repeat selection', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 2 },
+      ],
+    });
+    network.depart({ shipmentId: 'zero', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.blockRoute('road');
+    expect(network.returnBlockedShipment('zero').shipments[0]).toMatchObject({
+      status: 'returned',
+      blockReturnTick: 0,
+      blockReturnElapsedTicks: 0,
+      returnDueTick: 0,
+    });
+    const before = network.getState();
+    expect(() => network.returnBlockedShipment('zero')).toThrow(/blocked/i);
+    expect(network.getState()).toEqual(before);
+  });
+
   it('pauses a closed route, blocks departures, and resumes the exact remaining journey', () => {
     const inventory = createInventory({
       owners: ['north', 'south', 'east', 'transit'],
