@@ -4,6 +4,16 @@
  */
 export const engineStatus = { implemented: false } as const;
 
+export * from './services/engine.js';
+export * from './models/commands.js';
+export * from './models/events.js';
+export * from './models/world.js';
+export * from './services/scheduler.js';
+export * from './services/rng.js';
+export * from './services/phases.js';
+export * from './services/codec.js';
+export * from './shared/canonical.js';
+
 export * from './world.js';
 export * from './domain.js';
 export * from './commodity.js';
