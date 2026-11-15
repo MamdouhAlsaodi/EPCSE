@@ -5,6 +5,8 @@ import {
   createMoneyLedger,
   createPaidShipmentCoordinator,
   createRouteNetwork,
+  hasBilateralTradePermit,
+  registerDiplomacy,
   registerLocalEconomy,
   registerLogistics,
 } from '../../packages/simulation-core/src/index.js';
@@ -130,6 +132,465 @@ describe('shared logistics route rules', () => {
 });
 
 describe('engine logistics integration', () => {
+  it('withdraws an accepted treaty at its effective tick and pays one funded early-withdrawal penalty', () => {
+    const engine = createEngine({ initialState: {} }, 1);
+    registerDiplomacy(engine, {
+      offers: [
+        {
+          offerId: 'withdrawable',
+          fromKingdomId: 'north',
+          toKingdomId: 'south',
+          routeId: 'road',
+          commodity: 'grain',
+          effectiveTick: 2,
+          expiryTick: 8,
+          withdrawalPenalty: 3,
+        },
+        {
+          offerId: 'other-route',
+          fromKingdomId: 'north',
+          toKingdomId: 'south',
+          routeId: 'other-road',
+          commodity: 'grain',
+        },
+      ],
+      kingdoms: [
+        { kingdomId: 'north', controller: 'player' },
+        { kingdomId: 'south', controller: 'ai' },
+      ],
+      preferences: {
+        north: { minimumTreasury: 0, minimumStock: 0 },
+        south: { minimumTreasury: 0, minimumStock: 0 },
+      },
+    });
+    registerLogistics(engine, {
+      ...config,
+      accounts: [
+        ...config.accounts,
+        { id: 'north-treasury', ownerId: 'north', openingBalance: 10 },
+        { id: 'south-treasury', ownerId: 'south', openingBalance: 0 },
+      ],
+      cityKingdomIds: { north: 'north', south: 'south' },
+    });
+    engine.step();
+    engine.submit({
+      commandId: 'accept',
+      type: 'diplomacy.decision',
+      requestedTick: 2,
+      payload: { offerId: 'withdrawable', kingdomId: 'north', accepted: true, reason: 'deal' },
+    });
+    engine.submit({
+      commandId: 'accept-other-route',
+      type: 'diplomacy.decision',
+      requestedTick: 2,
+      payload: {
+        offerId: 'other-route',
+        kingdomId: 'north',
+        accepted: true,
+        reason: 'separate treaty',
+      },
+    });
+    engine.step();
+    engine.submit({
+      commandId: 'paid-cargo',
+      type: 'logistics.depart',
+      requestedTick: 3,
+      payload: {
+        shipmentId: 'paid-cargo',
+        routeId: 'road',
+        commodity: 'grain',
+        quantity: 1,
+        buyerAccountId: 'buyer',
+        payment: 4,
+      },
+    });
+    engine.submit({
+      commandId: 'withdraw',
+      type: 'diplomacy.withdrawal',
+      requestedTick: 3,
+      payload: { offerId: 'withdrawable', kingdomId: 'north', effectiveTick: 5, reason: 'exit' },
+    });
+    engine.step();
+    const afterPayment = engine.getState().domain.accounting as {
+      accounts: Array<{ id: string; balance: number }>;
+      journal: Array<{ causeId: string; type: string }>;
+    };
+    expect(afterPayment.accounts.find((account) => account.id === 'north-treasury')?.balance).toBe(
+      7,
+    );
+    expect(afterPayment.accounts.find((account) => account.id === 'south-treasury')?.balance).toBe(
+      3,
+    );
+    expect(afterPayment.journal).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ causeId: 'diplomacy:withdrawal:withdrawable', type: 'payment' }),
+      ]),
+    );
+    expect(engine.getState().domain.logistics).toMatchObject({
+      shipments: [expect.objectContaining({ shipmentId: 'paid-cargo', status: 'in-transit' })],
+    });
+    const domain = engine.getState().domain;
+    expect(hasBilateralTradePermit(domain, 'road', 'grain', 'north', 'south', 4)).toBe(true);
+    expect(hasBilateralTradePermit(domain, 'road', 'grain', 'north', 'south', 5)).toBe(false);
+    expect(hasBilateralTradePermit(domain, 'other-road', 'grain', 'north', 'south', 5)).toBe(true);
+    engine.submit({
+      commandId: 'duplicate-withdraw',
+      type: 'diplomacy.withdrawal',
+      requestedTick: 4,
+      payload: { offerId: 'withdrawable', kingdomId: 'north', effectiveTick: 5, reason: 'again' },
+    });
+    engine.step();
+    expect(
+      engine.receipts().find((receipt) => receipt.commandId === 'duplicate-withdraw'),
+    ).toMatchObject({ status: 'rejected' });
+    expect((engine.getState().domain.accounting as typeof afterPayment).accounts).toEqual(
+      afterPayment.accounts,
+    );
+  });
+
+  it('rejects unauthorized and unfunded treaty withdrawals without mutation', () => {
+    const engine = createEngine({ initialState: {} }, 1);
+    registerDiplomacy(engine, {
+      offers: [
+        {
+          offerId: 'withdrawable',
+          fromKingdomId: 'north',
+          toKingdomId: 'south',
+          routeId: 'road',
+          commodity: 'grain',
+          withdrawalPenalty: 5,
+        },
+      ],
+      kingdoms: [
+        { kingdomId: 'north', controller: 'player' },
+        { kingdomId: 'south', controller: 'ai' },
+      ],
+      preferences: {
+        north: { minimumTreasury: 0, minimumStock: 0 },
+        south: { minimumTreasury: 0, minimumStock: 0 },
+      },
+    });
+    registerLogistics(engine, {
+      ...config,
+      accounts: [
+        ...config.accounts,
+        { id: 'north-treasury', ownerId: 'north', openingBalance: 1 },
+        { id: 'south-treasury', ownerId: 'south', openingBalance: 0 },
+      ],
+      cityKingdomIds: { north: 'north', south: 'south' },
+    });
+    engine.step();
+    engine.submit({
+      commandId: 'accept-withdrawable',
+      type: 'diplomacy.decision',
+      requestedTick: 2,
+      payload: { offerId: 'withdrawable', kingdomId: 'north', accepted: true, reason: 'deal' },
+    });
+    engine.submit({
+      commandId: 'ai-withdraw',
+      type: 'diplomacy.withdrawal',
+      requestedTick: 2,
+      payload: { offerId: 'withdrawable', kingdomId: 'south', effectiveTick: 4, reason: 'exit' },
+    });
+    engine.step();
+    expect(engine.receipts().find((receipt) => receipt.commandId === 'ai-withdraw')).toMatchObject({
+      status: 'rejected',
+    });
+    engine.submit({
+      commandId: 'unfunded',
+      type: 'diplomacy.withdrawal',
+      requestedTick: 3,
+      payload: { offerId: 'withdrawable', kingdomId: 'north', effectiveTick: 4, reason: 'exit' },
+    });
+    engine.step();
+    expect(engine.receipts().find((receipt) => receipt.commandId === 'unfunded')).toMatchObject({
+      status: 'rejected',
+    });
+    expect(engine.getState().domain.diplomacy).toMatchObject({ withdrawals: [] });
+    const accounting = engine.getState().domain.accounting as {
+      accounts: unknown[];
+      journal: unknown[];
+    };
+    expect(accounting.accounts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'north-treasury', balance: 1 }),
+        expect.objectContaining({ id: 'south-treasury', balance: 0 }),
+      ]),
+    );
+    expect(accounting.journal).toEqual([]);
+  });
+  it('counts bilateral treaty quota on departures and rejects excess departures atomically', () => {
+    const engine = createEngine({ initialState: {} }, 1);
+    registerDiplomacy(engine, {
+      offers: [
+        {
+          offerId: 'limited',
+          fromKingdomId: 'north',
+          toKingdomId: 'south',
+          routeId: 'road',
+          commodity: 'grain',
+          effectiveTick: 3,
+          expiryTick: 6,
+          quota: 1,
+          tariffDiscountBps: 5000,
+        },
+      ],
+      kingdoms: [
+        { kingdomId: 'north', controller: 'player' },
+        { kingdomId: 'south', controller: 'ai' },
+      ],
+      preferences: {
+        north: { minimumTreasury: 0, minimumStock: 0 },
+        south: { minimumTreasury: 0, minimumStock: 0 },
+      },
+    });
+    registerLogistics(engine, { ...config, cityKingdomIds: { north: 'north', south: 'south' } });
+    engine.step();
+    engine.submit({
+      commandId: 'accept',
+      type: 'diplomacy.decision',
+      requestedTick: 2,
+      payload: { offerId: 'limited', kingdomId: 'north', accepted: true, reason: 'mutual benefit' },
+    });
+    engine.step();
+    const departure = (commandId: string, shipmentId: string, requestedTick: number) =>
+      engine.submit({
+        commandId,
+        type: 'logistics.depart',
+        requestedTick,
+        payload: {
+          shipmentId,
+          routeId: 'road',
+          commodity: 'grain',
+          quantity: 1,
+          buyerAccountId: 'buyer',
+          payment: 4,
+        },
+      });
+    departure('first', 'first-shipment', 3);
+    engine.step();
+    const before = engine.getState().domain;
+    departure('over-quota', 'over-quota-shipment', 4);
+    engine.step();
+    expect(engine.receipts().find((receipt) => receipt.commandId === 'over-quota')).toMatchObject({
+      status: 'rejected',
+    });
+    expect(engine.getState().domain.logistics).toMatchObject({
+      shipments: [{ shipmentId: 'first-shipment' }],
+    });
+    expect(engine.getState().domain.accounting).toEqual(before.accounting);
+  });
+  it('counts overlapping treaty quotas per offer and rejects only after both are exhausted', () => {
+    const engine = createEngine({ initialState: {} }, 1);
+    registerDiplomacy(engine, {
+      offers: ['first', 'second'].map((offerId) => ({
+        offerId,
+        fromKingdomId: 'north',
+        toKingdomId: 'south',
+        routeId: 'road',
+        commodity: 'grain',
+        quota: 1,
+      })),
+      kingdoms: [
+        { kingdomId: 'north', controller: 'player' },
+        { kingdomId: 'south', controller: 'ai' },
+      ],
+      preferences: {
+        north: { minimumTreasury: 0, minimumStock: 0 },
+        south: { minimumTreasury: 0, minimumStock: 0 },
+      },
+    });
+    registerLogistics(engine, { ...config, cityKingdomIds: { north: 'north', south: 'south' } });
+    engine.step();
+    for (const offerId of ['first', 'second'])
+      engine.submit({
+        commandId: `accept-${offerId}`,
+        type: 'diplomacy.decision',
+        requestedTick: 2,
+        payload: { offerId, kingdomId: 'north', accepted: true, reason: 'deal' },
+      });
+    engine.step();
+    for (let i = 1; i <= 3; i++) {
+      engine.submit({
+        commandId: `depart-${i}`,
+        type: 'logistics.depart',
+        requestedTick: i + 2,
+        payload: {
+          shipmentId: `shipment-${i}`,
+          routeId: 'road',
+          commodity: 'grain',
+          quantity: 1,
+          buyerAccountId: 'buyer',
+          payment: 4,
+        },
+      });
+      engine.step();
+    }
+    expect(engine.receipts().find((r) => r.commandId === 'depart-1')?.status).toBe('applied');
+    expect(engine.receipts().find((r) => r.commandId === 'depart-2')?.status).toBe('applied');
+    expect(engine.receipts().find((r) => r.commandId === 'depart-3')?.status).toBe('rejected');
+    expect(
+      (
+        engine.getState().domain.logistics as {
+          shipments: Array<{ treatyOfferId?: string }>;
+        }
+      ).shipments.map((s) => s.treatyOfferId),
+    ).toEqual(['first', 'second']);
+    const forged = engine.snapshot();
+    delete (forged.domain.logistics as { shipments: Array<{ treatyOfferId?: string }> })
+      .shipments[1]!.treatyOfferId;
+    expect(() => engine.restore(forged)).toThrow('invalid shipment treaty provenance');
+  });
+  it('blocks only new departures covered by a targeted sanction without touching paid cargo', () => {
+    const engine = createEngine({ initialState: {} }, 1);
+    registerDiplomacy(engine, {
+      offers: [
+        {
+          offerId: 'permit',
+          fromKingdomId: 'north',
+          toKingdomId: 'south',
+          routeId: 'road',
+          commodity: 'grain',
+        },
+        {
+          offerId: 'wood-permit',
+          fromKingdomId: 'north',
+          toKingdomId: 'south',
+          routeId: 'road',
+          commodity: 'wood',
+        },
+        {
+          offerId: 'river-permit',
+          fromKingdomId: 'north',
+          toKingdomId: 'south',
+          routeId: 'river',
+          commodity: 'grain',
+        },
+      ],
+      kingdoms: [
+        { kingdomId: 'north', controller: 'player' },
+        { kingdomId: 'south', controller: 'ai' },
+      ],
+      preferences: {
+        north: { minimumTreasury: 0, minimumStock: 0 },
+        south: { minimumTreasury: 0, minimumStock: 0 },
+      },
+    });
+    registerLogistics(engine, {
+      ...config,
+      commodities: [...config.commodities, { id: 'wood', unit: 'unit', scale: 0 }],
+      stock: [...config.stock, { ownerId: 'north', commodity: 'wood', quantity: 2 }],
+      routes: [...config.routes, { ...config.routes[0]!, routeId: 'river' }],
+      cityKingdomIds: { north: 'north', south: 'south' },
+    });
+    engine.step();
+    engine.submit({
+      commandId: 'accept-permit',
+      type: 'diplomacy.decision',
+      requestedTick: 2,
+      payload: { offerId: 'permit', kingdomId: 'north', accepted: true, reason: 'trade' },
+    });
+    engine.submit({
+      commandId: 'accept-wood',
+      type: 'diplomacy.decision',
+      requestedTick: 2,
+      payload: {
+        offerId: 'wood-permit',
+        kingdomId: 'north',
+        accepted: true,
+        reason: 'uncovered good',
+      },
+    });
+    engine.submit({
+      commandId: 'accept-river',
+      type: 'diplomacy.decision',
+      requestedTick: 2,
+      payload: {
+        offerId: 'river-permit',
+        kingdomId: 'north',
+        accepted: true,
+        reason: 'uncovered route',
+      },
+    });
+    engine.submit({
+      commandId: 'sanction',
+      type: 'diplomacy.sanction',
+      requestedTick: 2,
+      payload: {
+        sanctionId: 'grain-stop',
+        issuerKingdomId: 'north',
+        targetKingdomId: 'south',
+        routeId: 'road',
+        commodity: 'grain',
+        effectiveTick: 3,
+        expiryTick: 5,
+        reason: 'policy',
+      },
+    });
+    engine.step();
+    const before = engine.getState().domain.accounting;
+    engine.submit({
+      commandId: 'uncovered-good',
+      type: 'logistics.depart',
+      requestedTick: 3,
+      payload: {
+        shipmentId: 'wood-road',
+        routeId: 'road',
+        commodity: 'wood',
+        quantity: 1,
+        buyerAccountId: 'buyer',
+        payment: 4,
+      },
+    });
+    engine.submit({
+      commandId: 'uncovered-route',
+      type: 'logistics.depart',
+      requestedTick: 3,
+      payload: {
+        shipmentId: 'grain-river',
+        routeId: 'river',
+        commodity: 'grain',
+        quantity: 1,
+        buyerAccountId: 'buyer',
+        payment: 4,
+      },
+    });
+    engine.submit({
+      commandId: 'blocked-departure',
+      type: 'logistics.depart',
+      requestedTick: 3,
+      payload: {
+        shipmentId: 'blocked',
+        routeId: 'road',
+        commodity: 'grain',
+        quantity: 1,
+        buyerAccountId: 'buyer',
+        payment: 4,
+      },
+    });
+    engine.step();
+    expect(
+      engine.receipts().find((receipt) => receipt.commandId === 'blocked-departure'),
+    ).toMatchObject({
+      status: 'rejected',
+    });
+    expect(
+      engine
+        .receipts()
+        .filter((receipt) => ['uncovered-good', 'uncovered-route'].includes(receipt.commandId)),
+    ).toEqual([
+      expect.objectContaining({ commandId: 'uncovered-good', status: 'applied' }),
+      expect.objectContaining({ commandId: 'uncovered-route', status: 'applied' }),
+    ]);
+    expect(engine.getState().domain.accounting).not.toEqual(before);
+    expect(engine.getState().domain.logistics).toMatchObject({
+      shipments: expect.arrayContaining([
+        expect.objectContaining({ shipmentId: 'wood-road', status: 'in-transit' }),
+        expect.objectContaining({ shipmentId: 'grain-river', status: 'in-transit' }),
+      ]),
+    });
+  });
+
   it('pauses an in-flight delivery during route closure and resumes it after reopening', () => {
     const engine = createEngine({ initialState: {} }, 1);
     registerLogistics(engine, config);

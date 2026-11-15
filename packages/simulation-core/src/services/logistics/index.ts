@@ -48,6 +48,7 @@ type Shipment = {
   buyerAccountId: string;
   carrierAccountId: string;
   payment: number;
+  treatyOfferId?: string;
   attackTick?: number;
   returnDueTick?: number;
   pausedRemainingTicks?: number;
@@ -66,6 +67,7 @@ type LogisticsState = {
   configDigest: string;
   tick: number;
   routes: LogisticsRoute[];
+  cityKingdomIds?: Record<string, string>;
   shipments: Shipment[];
   closedRouteIds: string[];
   blockedRouteIds: string[];
@@ -147,6 +149,7 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
     configDigest: digest,
     tick: 0,
     routes: safe.routes,
+    ...(safe.cityKingdomIds ? { cityKingdomIds: safe.cityKingdomIds } : {}),
     shipments: [],
     closedRouteIds: [],
     blockedRouteIds: [],
@@ -246,9 +249,15 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
     const a = d.accounting as AccountingState;
     if (!a || a.owners.indexOf(safe.transitOwnerId) < 0)
       throw new TypeError('missing logistics accounting');
-    if (!Number.isSafeInteger(l.tick) || l.tick < 0 || hash(l.routes) !== hash(safe.routes))
+    if (
+      !Number.isSafeInteger(l.tick) ||
+      l.tick < 0 ||
+      hash(l.routes) !== hash(safe.routes) ||
+      hash(l.cityKingdomIds ?? {}) !== hash(safe.cityKingdomIds ?? {})
+    )
       throw new TypeError('invalid logistics tick/config routes');
     const ids = new Set<string>();
+    const treatyCounts = new Map<string, number>();
     const capacity = new Map<string, number>();
     const expectedTransit = new Map<string, string>();
     for (const s of l.shipments) {
@@ -313,6 +322,44 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
         throw new TypeError('invalid shipment provenance/timing');
       if (!['in-transit', 'arrived', 'returning', 'returned'].includes(s.status))
         throw new TypeError('invalid shipment status');
+      const originalFrom = l.cityKingdomIds?.[fareRoute.sourceCityId];
+      const originalTo = l.cityKingdomIds?.[fareRoute.destinationCityId];
+      if (d.diplomacy && originalFrom && originalTo && originalFrom !== originalTo) {
+        const diplomacy = d.diplomacy as {
+          offers: Array<{
+            offerId: string;
+            routeId: string;
+            commodity: string;
+            fromKingdomId: string;
+            toKingdomId: string;
+            effectiveTick?: number;
+            expiryTick?: number;
+            quota?: number;
+          }>;
+          withdrawals?: Array<{ offerId: string; effectiveTick: number }>;
+        };
+        const departure = s.rerouteOriginalDepartureTick ?? s.departureTick;
+        const offer = diplomacy.offers.find((item) => item.offerId === s.treatyOfferId);
+        if (
+          !offer ||
+          offer.routeId !== fareRoute.routeId ||
+          offer.commodity !== s.commodity ||
+          offer.fromKingdomId !== originalFrom ||
+          offer.toKingdomId !== originalTo ||
+          (offer.effectiveTick !== undefined && departure < offer.effectiveTick) ||
+          (offer.expiryTick !== undefined && departure > offer.expiryTick) ||
+          diplomacy.withdrawals?.some(
+            (w) => w.offerId === offer.offerId && departure >= w.effectiveTick,
+          )
+        )
+          throw new TypeError('invalid shipment treaty provenance');
+        const count = (treatyCounts.get(offer.offerId) ?? 0) + 1;
+        if (offer.quota !== undefined && count > offer.quota)
+          throw new TypeError('shipment treaty quota exceeded');
+        treatyCounts.set(offer.offerId, count);
+      } else if (s.treatyOfferId !== undefined) {
+        throw new TypeError('unexpected shipment treaty provenance');
+      }
       if (s.status === 'in-transit' || s.status === 'returning') {
         const used = (capacity.get(route.routeId) ?? 0) + s.quantity;
         const historicalCapacity = Math.max(
@@ -358,6 +405,35 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
       const destinationKingdom = safe.cityKingdomIds?.[route.destinationCityId];
       if (d.diplomacy && (!sourceKingdom || !destinationKingdom))
         throw new RangeError('city kingdom mapping required when diplomacy is registered');
+      const sanctions =
+        (
+          d.diplomacy as
+            | {
+                sanctions?: Array<{
+                  issuerKingdomId: string;
+                  targetKingdomId: string;
+                  routeId: string;
+                  commodity: string;
+                  effectiveTick: number;
+                  expiryTick: number;
+                }>;
+              }
+            | undefined
+        )?.sanctions ?? [];
+      if (
+        sanctions.some(
+          (sanction) =>
+            sanction.routeId === route.routeId &&
+            sanction.commodity === p?.commodity &&
+            sanction.effectiveTick <= now &&
+            now <= sanction.expiryTick &&
+            ((sanction.issuerKingdomId === sourceKingdom &&
+              sanction.targetKingdomId === destinationKingdom) ||
+              (sanction.issuerKingdomId === destinationKingdom &&
+                sanction.targetKingdomId === sourceKingdom)),
+        )
+      )
+        throw new RangeError('shipment blocked by active targeted sanction');
       if (
         sourceKingdom &&
         destinationKingdom &&
@@ -368,6 +444,7 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
           String(p?.commodity),
           sourceKingdom,
           destinationKingdom,
+          now,
         )
       )
         throw new RangeError('bilateral trade permit is not accepted');
@@ -438,6 +515,66 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
       const buyerIsMappedSource = buyer.ownerId === cityOwner(route.sourceCityId);
       if (tariffs.length && (!buyerIsMappedSource || sourceKingdom === destinationKingdom))
         throw new RangeError('tariff payer does not match trusted origin jurisdiction');
+      const activeTreaty = (
+        d.diplomacy as
+          | {
+              offers?: Array<{
+                offerId: string;
+                routeId: string;
+                commodity: string;
+                fromKingdomId: string;
+                toKingdomId: string;
+                effectiveTick?: number;
+                expiryTick?: number;
+                quota?: number;
+                tariffDiscountBps?: number;
+              }>;
+              decisions?: Array<{ offerId: string; kingdomId: string; accepted: boolean }>;
+              withdrawals?: Array<{ offerId: string; effectiveTick: number }>;
+            }
+          | undefined
+      )?.offers?.find((offer) => {
+        if (
+          offer.routeId !== route.routeId ||
+          offer.commodity !== p.commodity ||
+          offer.fromKingdomId !== sourceKingdom ||
+          offer.toKingdomId !== destinationKingdom ||
+          (offer.effectiveTick !== undefined && now < offer.effectiveTick) ||
+          (offer.expiryTick !== undefined && now > offer.expiryTick) ||
+          (
+            d.diplomacy as { withdrawals?: Array<{ offerId: string; effectiveTick: number }> }
+          ).withdrawals?.some(
+            (withdrawal) => withdrawal.offerId === offer.offerId && now >= withdrawal.effectiveTick,
+          ) ||
+          ![offer.fromKingdomId, offer.toKingdomId].every((kingdomId) =>
+            (
+              d.diplomacy as {
+                decisions: Array<{ offerId: string; kingdomId: string; accepted: boolean }>;
+              }
+            ).decisions.some(
+              (decision) =>
+                decision.offerId === offer.offerId &&
+                decision.kingdomId === kingdomId &&
+                decision.accepted,
+            ),
+          )
+        )
+          return false;
+        return (
+          offer.quota === undefined ||
+          l.shipments.filter((shipment) => shipment.treatyOfferId === offer.offerId).length <
+            offer.quota
+        );
+      });
+      if (
+        d.diplomacy &&
+        sourceKingdom &&
+        destinationKingdom &&
+        sourceKingdom !== destinationKingdom &&
+        !activeTreaty
+      )
+        throw new RangeError('bilateral treaty departure quota exhausted');
+      const discountBps = activeTreaty?.tariffDiscountBps ?? 0;
       const operations: AccountingOperation[] = [
         {
           type: 'payment',
@@ -446,18 +583,25 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
           amount: money(a, route.fare),
           causeId: `logistics:${id}:fare`,
         },
-        ...tariffs.map((policy) => {
+        ...tariffs.flatMap((policy) => {
           const importer = government!.kingdoms.find(
             (item) => item.kingdomId === policy.importKingdomId,
           );
           if (!importer) throw new RangeError('unknown tariff import treasury');
-          return {
-            type: 'payment' as const,
-            fromAccountId: buyer.id,
-            toAccountId: account(a, importer.treasuryAccountId).id,
-            amount: money(a, policy.amount),
-            causeId: `government:${policy.policyId}:shipment:${id}`,
-          };
+          const tariffAmount = Number(
+            (BigInt(policy.amount) * BigInt(10_000 - discountBps)) / 10_000n,
+          );
+          return tariffAmount === 0
+            ? []
+            : [
+                {
+                  type: 'payment' as const,
+                  fromAccountId: buyer.id,
+                  toAccountId: account(a, importer.treasuryAccountId).id,
+                  amount: money(a, tariffAmount),
+                  causeId: `government:${policy.policyId}:shipment:${id}`,
+                },
+              ];
         }),
         {
           type: 'reserve',
@@ -487,6 +631,7 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
         buyerAccountId: buyer.id,
         carrierAccountId: carrier.id,
         payment: route.fare,
+        ...(activeTreaty ? { treatyOfferId: activeTreaty.offerId } : {}),
       });
     }),
   );
