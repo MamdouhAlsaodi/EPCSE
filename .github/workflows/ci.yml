@@ -24,4 +24,21 @@ jobs:
       - run: pnpm test
       - run: pnpm build
       - run: node apps/cli/dist/main.js
+      - name: Built S0 CLI deterministic smoke
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { spawnSync } from 'node:child_process';
+          const args = ['apps/cli/dist/main.js', 'run', '--scenario', 'initial-two-cities', '--seed', '42', '--ticks', '100'];
+          const first = spawnSync(process.execPath, args, { encoding: 'utf8' });
+          const second = spawnSync(process.execPath, args, { encoding: 'utf8' });
+          assert.equal(first.status, 0, first.stderr);
+          assert.equal(second.status, 0, second.stderr);
+          assert.equal(first.stdout, second.stdout, 'repeated built CLI output differs');
+          assert.match(first.stdout, /State hash: [a-f0-9]{64}/);
+          assert.match(first.stdout, /Event hash: [a-f0-9]{64}/);
+          const invalid = spawnSync(process.execPath, ['apps/cli/dist/main.js', 'run', '--scenario', 'initial-two-cities', '--ticks', '0'], { encoding: 'utf8' });
+          assert.notEqual(invalid.status, 0, 'invalid CLI input unexpectedly succeeded');
+          console.log(first.stdout);
+          NODE
       - run: node --input-type=module -e "import { createWorld } from '@epcse/simulation-core'; if (createWorld('ci').run(2).tick !== 2) process.exit(1)"
