@@ -4,6 +4,8 @@ import {
   runInitialTwoCities,
   runMultiCityRerouteDemo,
   runTwoCityScenario,
+  runVerticalSlice,
+  verticalSliceSummary,
   scenarioStatus,
 } from '@epcse/scenarios';
 import { engineStatus } from '@epcse/simulation-core';
@@ -28,10 +30,11 @@ function runS0(args: readonly string[]): string[] {
       }
     } else throw new Error(`unknown run option: ${option}`);
   }
-  if (scenario !== 'initial-two-cities')
-    throw new Error('run requires --scenario initial-two-cities');
   if (seed < 0 || seed > 0xffffffff) throw new Error('--seed must be uint32');
   if (ticks <= 0) throw new Error('--ticks must be positive');
+  if (scenario === 'vertical-slice') return verticalSliceSummary(runVerticalSlice({ seed, ticks }));
+  if (scenario !== 'initial-two-cities')
+    throw new Error('run requires --scenario initial-two-cities or vertical-slice');
   const report = runInitialTwoCities(seed, ticks).report();
   const effects = report.effects.join(', ');
   const priceChanges = report.prices.reduce(
