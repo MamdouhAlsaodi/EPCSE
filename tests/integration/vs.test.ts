@@ -55,8 +55,14 @@ describe('vertical-slice scenario', () => {
       '--ticks',
       '1000',
     ];
-    const first = (await cli(process.execPath, args, { timeout: 1800000 })).stdout;
-    const second = (await cli(process.execPath, args, { timeout: 1800000 })).stdout;
+    // Run independent CLI processes concurrently so slow CI runners do not exceed
+    // Vitest's worker RPC timeout while still comparing complete 1000-tick reports.
+    const [firstRun, secondRun] = await Promise.all([
+      cli(process.execPath, args, { timeout: 1800000 }),
+      cli(process.execPath, args, { timeout: 1800000 }),
+    ]);
+    const first = firstRun.stdout;
+    const second = secondRun.stdout;
     expect(first).toBe(second);
     expect(first).toContain('1000 ticks');
     expect(first).toContain('funded intervention paid (10 coin debited)');
