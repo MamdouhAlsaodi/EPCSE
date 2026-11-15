@@ -56,6 +56,10 @@ type EconomyState = {
       batches: number;
       employed: number;
       cityId: string;
+      ownerId: string;
+      accountId: string;
+      recipeId: string;
+      wagePerBatch: number;
       maxBatches: number;
       laborPerBatch: number;
       requiredSkills: Record<string, number>;
@@ -271,6 +275,10 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
           batches: 0,
           employed: 0,
           cityId: p.cityId,
+          ownerId: p.ownerId,
+          accountId: p.accountId,
+          recipeId: p.recipeId,
+          wagePerBatch: p.wagePerBatch,
           maxBatches: p.maxBatches,
           laborPerBatch: p.laborPerBatch,
           requiredSkills: { ...(p.requiredSkills ?? {}) },
@@ -315,7 +323,14 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
       const result = e.producers[p.id]!;
       result.batches = 0;
       result.employed = 0;
-      result.stopped = null;
+      const firm = (
+        draft.firms as { firms?: Record<string, { status: string; capacity: number }> } | undefined
+      )?.firms?.[p.id];
+      if (firm?.status === 'closed' || firm?.status === 'insolvent') {
+        result.stopped = 'closed';
+        continue;
+      }
+      const capacity = firm?.capacity ?? p.maxBatches;
       const recipe = a.recipes.find((r) => r.id === p.recipeId)!;
       const eligible = cohorts.filter(
         (c) => cohortCity(draft, c) === p.cityId && eligibleForProducer(draft, c, p),
@@ -331,9 +346,9 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
       const availableWorkers = Math.max(0, labor - workers);
       const liquidity = account(a, p.accountId).balance;
       let batches = Math.min(
-        p.maxBatches,
+        capacity,
         Math.floor(availableWorkers / p.laborPerBatch),
-        p.wagePerBatch ? Math.floor(liquidity / p.wagePerBatch) : p.maxBatches,
+        p.wagePerBatch ? Math.floor(liquidity / p.wagePerBatch) : capacity,
         ...recipe.inputs.map((line) =>
           Math.floor(stock(a, p.ownerId, line.commodity) / line.quantity),
         ),
