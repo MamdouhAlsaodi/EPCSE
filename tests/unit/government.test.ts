@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { createAccountingState } from '../../packages/simulation-core/src/services/accounting/index.js';
+import {
+  applyAccountingTransaction,
+  createAccountingState,
+} from '../../packages/simulation-core/src/services/accounting/index.js';
 import { createEngine } from '../../packages/simulation-core/src/services/engine.js';
 import {
   applyScheduledTransfer,
   registerGovernment,
   scheduleFundedTransfer,
   type GovernmentKingdom,
+  assessGovernmentTax,
+  decideInstitutionalPolicy,
 } from '../../packages/simulation-core/src/services/government/index.js';
 const kingdoms: GovernmentKingdom[] = [
   {
@@ -133,5 +138,131 @@ describe('funded government transfers', () => {
         'households-s',
       ),
     ).toEqual(initial());
+  });
+  it('charges an eligible payer into the treasury once for a taxable event', () => {
+    const fundedPayer = applyAccountingTransaction(
+      initial(),
+      [
+        {
+          type: 'payment',
+          fromAccountId: 'treasury-n',
+          toAccountId: 'households-n',
+          amount: { kind: 'money', currencyId: 'coin', unit: 'coin', scale: 0, minor: 5 },
+          causeId: 'seed-payer',
+        },
+      ],
+      'seed-payer',
+    );
+    const charged = assessGovernmentTax(fundedPayer, {
+      policyId: 'levy',
+      payerAccountId: 'households-n',
+      treasuryAccountId: 'treasury-n',
+      amount: 3,
+      taxableEventId: 'sale-1',
+      tick: 2,
+    });
+    expect(charged.accounts.map((account) => account.balance)).toEqual([8, 2, 0]);
+    expect(charged.journal).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'payment', causeId: 'government:levy:event:sale-1' }),
+      ]),
+    );
+    expect(
+      assessGovernmentTax(charged, {
+        policyId: 'levy',
+        payerAccountId: 'households-n',
+        treasuryAccountId: 'treasury-n',
+        amount: 3,
+        taxableEventId: 'sale-1',
+        tick: 2,
+      }),
+    ).toBe(charged);
+  });
+  it('does not treat caller-asserted jurisdiction as tax authorization', () => {
+    const state = createAccountingState({
+      currency: { id: 'coin', unit: 'coin', scale: 0 },
+      commodities: [],
+      owners: ['north', 'firm-1'],
+      accounts: [
+        { id: 'treasury-n', ownerId: 'north', openingBalance: 0 },
+        { id: 'firm-cash', ownerId: 'firm-1', openingBalance: 5 },
+      ],
+    });
+    expect(() =>
+      assessGovernmentTax(state, {
+        policyId: 'levy',
+        payerAccountId: 'firm-cash',
+        treasuryAccountId: 'treasury-n',
+        amount: 2,
+        taxableEventId: 'firm-sale',
+        tick: 1,
+      }),
+    ).toThrow(/one jurisdiction/i);
+    expect(state.accounts.map((account) => account.balance)).toEqual([0, 5]);
+  });
+  it('rejects an unfunded tax atomically without changing the ledger', () => {
+    const state = initial();
+    expect(() =>
+      assessGovernmentTax(state, {
+        policyId: 'levy',
+        payerAccountId: 'households-n',
+        treasuryAccountId: 'treasury-n',
+        amount: 1,
+        taxableEventId: 'sale-empty',
+        tick: 1,
+      }),
+    ).toThrow();
+    expect(state.accounts.map((account) => account.balance)).toEqual([10, 0, 0]);
+    expect(state.journal).toEqual([]);
+  });
+  it('enforces institutional veto and delay at the player command boundary', () => {
+    const engine = createEngine({ initialState: { accounting: initial() } }, 1);
+    registerGovernment(engine, {
+      kingdoms: [{ ...kingdoms[0]!, recipients: kingdoms[0]!.recipients }, kingdoms[1]!],
+      institutions: { north: 'parliamentary' },
+    });
+    const payload = {
+      kingdomId: 'north',
+      governmentId: 'north',
+      policyId: 'delayed-grant',
+      recipientKingdomId: 'north',
+      recipientOwnerId: 'north',
+      recipientAccountId: 'households-n',
+      amount: 1,
+      effectiveTick: 2,
+      expiryTick: 8,
+      legitimacy: 80,
+      quorum: 70,
+      support: 70,
+      oppositionVeto: false,
+    };
+    engine.submit({
+      commandId: 'approved-grant',
+      type: 'government.policy',
+      requestedTick: 1,
+      payload,
+    });
+    engine.step();
+    expect(engine.getState().domain.government).toMatchObject({
+      policies: [expect.objectContaining({ policyId: 'delayed-grant', effectiveTick: 4 })],
+    });
+  });
+  it('uses differentiated transparent institutional authority rules', () => {
+    const outcomes = (
+      ['city-council', 'monarchy', 'parliamentary', 'central-republic'] as const
+    ).map((institution) =>
+      decideInstitutionalPolicy({
+        institution,
+        legitimacy: 60,
+        quorum: 60,
+        support: 60,
+        oppositionVeto: true,
+      }),
+    );
+    expect(new Set(outcomes.map((outcome) => outcome.effectiveDelay)).size).toBeGreaterThan(1);
+    expect(new Set(outcomes.map((outcome) => outcome.approved)).size).toBeGreaterThan(1);
+    expect(outcomes.every((outcome) => outcome.reason && outcome.alternatives.length > 0)).toBe(
+      true,
+    );
   });
 });

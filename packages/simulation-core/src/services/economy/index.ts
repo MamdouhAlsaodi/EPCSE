@@ -48,7 +48,7 @@ export interface LocalEconomyConfig extends Omit<AccountingConfig, 'stock'> {
 type EconomyState = {
   version: 1;
   configDigest: string;
-  configCohorts: Record<string, { cityId: string }>;
+  configCohorts: Record<string, { cityId: string; ownerId: string; accountId: string }>;
   producers: Record<
     string,
     {
@@ -267,7 +267,9 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
   const initial: EconomyState = {
     version: 1,
     configDigest,
-    configCohorts: Object.fromEntries(cohorts.map((c) => [c.id, { cityId: c.cityId }])),
+    configCohorts: Object.fromEntries(
+      cohorts.map((c) => [c.id, { cityId: c.cityId, ownerId: c.ownerId, accountId: c.accountId }]),
+    ),
     producers: Object.fromEntries(
       producers.map((p) => [
         p.id,
@@ -503,40 +505,163 @@ export function registerLocalEconomy(engine: Engine, config: LocalEconomyConfig)
           continue;
         }
         const price = e.quotes[key(cohortCity(draft, c), commodity)]!.price;
+        const government = draft.government as
+          | {
+              kingdoms: Array<{ kingdomId: string; treasuryAccountId: string }>;
+              policies: Array<{
+                variant?: string;
+                policyId: string;
+                governmentId: string;
+                recipientAccountId: string;
+                recipientOwnerId: string;
+                commodity?: string;
+                amount: number;
+                spent?: number;
+                effectiveTick: number;
+                expiryTick: number;
+              }>;
+              decisions: Array<Record<string, unknown>>;
+              taxPolicies?: Array<{
+                variant: string;
+                policyId: string;
+                governmentId: string;
+                rateBps: number;
+                incidence: 'buyer' | 'seller';
+                effectiveTick: number;
+                expiryTick: number;
+              }>;
+              cityKingdomIds?: Record<string, string>;
+            }
+          | undefined;
         const available = stock(a, seller.ownerId, commodity),
           budget = account(a, c.accountId).balance;
-        const bought = Math.min(desired, available, Math.floor(budget / price));
+        const tick = engine.getState().tick + 1;
+        const jurisdiction = government?.cityKingdomIds?.[cohortCity(draft, c)];
+        const tax = government?.taxPolicies?.find(
+          (policy) =>
+            policy.variant === 'local-purchase-tax' &&
+            policy.governmentId === jurisdiction &&
+            tick >= policy.effectiveTick &&
+            tick <= policy.expiryTick,
+        );
+        const buyerFactor = tax?.incidence === 'buyer' ? 10000 + tax.rateBps : 10000;
+        const bought = Math.min(
+          desired,
+          available,
+          Number((BigInt(budget) * 10000n) / (BigInt(price) * BigInt(buyerFactor))),
+        );
         if (bought > 0) {
-          a = applyAccountingTransaction(
-            a,
-            [
-              {
-                type: 'payment',
-                fromAccountId: c.accountId,
-                toAccountId: seller.accountId,
-                amount: money(a, checkedNumber(BigInt(bought) * BigInt(price), 'purchase amount')),
-                causeId: `purchase:${c.id}:${commodity}`,
-              },
-              {
-                type: 'transfer',
-                ownerId: seller.ownerId,
-                toOwnerId: c.ownerId,
-                commodity,
-                quantity: quantity(a, commodity, bought),
-                from: 'available',
-                to: 'available',
-                causeId: `purchase:${c.id}:${commodity}`,
-              },
-              {
-                type: 'consume',
-                ownerId: c.ownerId,
-                commodity,
-                quantity: quantity(a, commodity, bought),
-                causeId: `consumption:${c.id}:${commodity}`,
-              },
-            ],
-            `settlement:${engine.getState().tick + 1}:${c.id}:${commodity}`,
+          const purchaseValue = checkedNumber(BigInt(bought) * BigInt(price), 'purchase amount');
+          const taxAmount = tax
+            ? checkedNumber(
+                (BigInt(purchaseValue) * BigInt(tax.rateBps)) / 10000n,
+                'local purchase tax',
+              )
+            : 0;
+          const subsidy = government?.policies.find(
+            (policy) =>
+              policy.variant === 'food-subsidy' &&
+              policy.governmentId === jurisdiction &&
+              policy.recipientAccountId === c.accountId &&
+              policy.commodity === commodity &&
+              tick >= policy.effectiveTick &&
+              tick <= policy.expiryTick,
           );
+          const treasury = subsidy
+            ? a.accounts.find(
+                (item) =>
+                  item.id ===
+                  government!.kingdoms.find((kingdom) => kingdom.kingdomId === subsidy.governmentId)
+                    ?.treasuryAccountId,
+              )
+            : undefined;
+          const remaining = subsidy ? Math.max(0, subsidy.amount - (subsidy.spent ?? 0)) : 0;
+          const requestedSubsidy = Math.min(remaining, purchaseValue);
+          const subsidyAmount =
+            subsidy && treasury ? Math.min(requestedSubsidy, treasury.balance) : 0;
+          const taxTreasury = tax
+            ? a.accounts.find(
+                (item) =>
+                  item.id ===
+                  government!.kingdoms.find((kingdom) => kingdom.kingdomId === tax.governmentId)
+                    ?.treasuryAccountId,
+              )
+            : undefined;
+          if (subsidy) {
+            const selected =
+              requestedSubsidy === 0 || subsidyAmount === 0
+                ? 'reject'
+                : subsidyAmount === requestedSubsidy
+                  ? 'fund'
+                  : 'reduce';
+            government!.decisions.push({
+              kingdomId: subsidy.governmentId,
+              policyId: subsidy.policyId,
+              tick,
+              selected,
+              cause: 'actual grain purchase settlement',
+              reason:
+                selected === 'fund'
+                  ? `paid the requested subsidy ${subsidyAmount} against an actual ${commodity} purchase`
+                  : `requested subsidy ${requestedSubsidy}; paid ${subsidyAmount} because available treasury or guarantee was insufficient`,
+              alternatives: ['fund', 'reduce', 'reject'],
+              information: [
+                `purchase=${purchaseValue}`,
+                `treasury=${treasury?.balance ?? 0}`,
+                `guaranteeRemaining=${remaining}`,
+              ],
+              constraints: [
+                'payment requires an actual commodity purchase',
+                'treasury and guarantee cannot be overdrawn',
+              ],
+            });
+          }
+          const operations: AccountingOperation[] = [
+            {
+              type: 'payment',
+              fromAccountId: c.accountId,
+              toAccountId: seller.accountId,
+              amount: money(a, purchaseValue),
+              causeId: `purchase:${c.id}:${commodity}`,
+            },
+            {
+              type: 'transfer',
+              ownerId: seller.ownerId,
+              toOwnerId: c.ownerId,
+              commodity,
+              quantity: quantity(a, commodity, bought),
+              from: 'available',
+              to: 'available',
+              causeId: `purchase:${c.id}:${commodity}`,
+            },
+            {
+              type: 'consume',
+              ownerId: c.ownerId,
+              commodity,
+              quantity: quantity(a, commodity, bought),
+              causeId: `consumption:${c.id}:${commodity}`,
+            },
+          ];
+          if (taxAmount > 0 && tax && taxTreasury) {
+            operations.push({
+              type: 'payment',
+              fromAccountId: tax.incidence === 'buyer' ? c.accountId : seller.accountId,
+              toAccountId: taxTreasury.id,
+              amount: money(a, taxAmount),
+              causeId: `government:${tax.policyId}:purchase:${c.id}:${commodity}`,
+            });
+          }
+          if (subsidyAmount > 0 && subsidy && treasury) {
+            operations.push({
+              type: 'payment',
+              fromAccountId: treasury.id,
+              toAccountId: c.accountId,
+              amount: money(a, subsidyAmount),
+              causeId: `government:${subsidy.policyId}:purchase:${c.id}:${commodity}`,
+            });
+          }
+          a = applyAccountingTransaction(a, operations, `settlement:${tick}:${c.id}:${commodity}`);
+          if (subsidy && subsidyAmount > 0) subsidy.spent = (subsidy.spent ?? 0) + subsidyAmount;
         }
         const unmet = desired - bought;
         state.unmet[commodity] = unmet;

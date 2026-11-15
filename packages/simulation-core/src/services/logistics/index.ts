@@ -169,6 +169,59 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
     if (!route) throw new RangeError('unknown route');
     return route;
   };
+  const effectiveCapacity = (
+    d: Record<string, unknown>,
+    route: LogisticsRoute,
+    tick: number,
+  ): number => {
+    const government = d.government as
+      | {
+          kingdoms?: Array<{ kingdomId: string; treasuryAccountId: string }>;
+          cityKingdomIds?: Record<string, string>;
+          investments?: Array<{
+            routeId?: string;
+            governmentId: string;
+            contractorAccountId: string;
+            cost: number;
+            capacityIncrease: number;
+            effectiveTick: number;
+            expiryTick: number;
+            policyId: string;
+          }>;
+        }
+      | undefined;
+    const accounting = d.accounting as AccountingState | undefined;
+    const bonus = (government?.investments ?? [])
+      .filter((investment) => {
+        if (
+          investment.routeId !== route.routeId ||
+          government?.cityKingdomIds?.[route.sourceCityId] !== investment.governmentId ||
+          !positive(investment.capacityIncrease) ||
+          investment.capacityIncrease > 1000 - route.capacity ||
+          tick < investment.effectiveTick ||
+          tick > investment.expiryTick
+        )
+          return false;
+        const kingdom = government?.kingdoms?.find(
+          (item) => item.kingdomId === investment.governmentId,
+        );
+        const journal = accounting?.journal.find(
+          (entry) => entry.causeId === `government:${investment.policyId}:contract`,
+        );
+        const effect = journal?.effects[0] as
+          { debit?: string; credit?: string; amount?: number } | undefined;
+        return (
+          !!kingdom &&
+          journal?.type === 'payment' &&
+          effect?.debit === kingdom.treasuryAccountId &&
+          effect.credit === investment.contractorAccountId &&
+          effect.amount === investment.cost &&
+          investment.contractorAccountId === route.carrierAccountId
+        );
+      })
+      .reduce((sum, investment) => sum + investment.capacityIncrease, 0);
+    return route.capacity + bonus;
+  };
   const transfer = (a: AccountingState, _from: string, to: string, s: Shipment, suffix: string) =>
     apply(
       a,
@@ -262,7 +315,11 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
         throw new TypeError('invalid shipment status');
       if (s.status === 'in-transit' || s.status === 'returning') {
         const used = (capacity.get(route.routeId) ?? 0) + s.quantity;
-        if (used > route.capacity) throw new TypeError('route capacity exceeded');
+        const historicalCapacity = Math.max(
+          effectiveCapacity(d, route, s.departureTick),
+          effectiveCapacity(d, route, l.tick + 1),
+        );
+        if (used > historicalCapacity) throw new TypeError('route capacity exceeded');
         capacity.set(route.routeId, used);
         expectedTransit.set(
           s.shipmentId,
@@ -333,39 +390,91 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
             s.routeId === route.routeId && (s.status === 'in-transit' || s.status === 'returning'),
         )
         .reduce((n, s) => n + s.quantity, 0);
-      if (p.quantity > route.capacity - busy) throw new RangeError('route capacity exceeded');
+      if (p.quantity > effectiveCapacity(d, route, now) - busy)
+        throw new RangeError('route capacity exceeded');
       const buyer = account(a, p.buyerAccountId),
         carrier = account(a, route.carrierAccountId);
       if (buyer.id === carrier.id) throw new RangeError('invalid payment parties');
       const commodity = quantity(a, p.commodity, p.quantity),
         id = p.shipmentId;
-      const next = applyAccountingTransaction(
-        a,
-        [
-          {
-            type: 'payment',
-            fromAccountId: buyer.id,
-            toAccountId: carrier.id,
-            amount: money(a, route.fare),
-            causeId: `logistics:${id}:fare`,
-          },
-          {
-            type: 'reserve',
-            ownerId: cityOwner(route.sourceCityId),
-            commodity: p.commodity,
-            quantity: commodity,
-            reservationId: `logistics:${id}:reservation`,
-            causeId: `logistics:${id}:reserve`,
-          },
-          {
-            type: 'depart',
-            reservationId: `logistics:${id}:reservation`,
-            shipmentId: id,
-            causeId: `logistics:${id}:depart`,
-          },
-        ],
-        `logistics:${id}:depart`,
+      const government = d.government as
+        | {
+            kingdoms: Array<{ kingdomId: string; treasuryAccountId: string }>;
+            tradePolicies?: Array<{
+              variant: string;
+              policyId: string;
+              governmentId: string;
+              importKingdomId: string;
+              routeId: string;
+              commodity: string;
+              amount: number;
+              effectiveTick: number;
+              expiryTick: number;
+            }>;
+          }
+        | undefined;
+      const eligiblePolicy = (policy: {
+        importKingdomId: string;
+        routeId: string;
+        commodity: string;
+        effectiveTick: number;
+        expiryTick: number;
+      }) =>
+        sourceKingdom !== undefined &&
+        destinationKingdom !== undefined &&
+        policy.importKingdomId === destinationKingdom &&
+        policy.routeId === route.routeId &&
+        policy.commodity === p.commodity &&
+        now >= policy.effectiveTick &&
+        now <= policy.expiryTick;
+      const restricted = government?.tradePolicies?.some(
+        (policy) => policy.variant === 'trade-restriction' && eligiblePolicy(policy),
       );
+      if (restricted) throw new RangeError('shipment blocked by active import restriction');
+      const tariffs =
+        government?.tradePolicies?.filter(
+          (policy) => policy.variant === 'import-tariff' && eligiblePolicy(policy),
+        ) ?? [];
+      const buyerIsMappedSource = buyer.ownerId === cityOwner(route.sourceCityId);
+      if (tariffs.length && (!buyerIsMappedSource || sourceKingdom === destinationKingdom))
+        throw new RangeError('tariff payer does not match trusted origin jurisdiction');
+      const operations: AccountingOperation[] = [
+        {
+          type: 'payment',
+          fromAccountId: buyer.id,
+          toAccountId: carrier.id,
+          amount: money(a, route.fare),
+          causeId: `logistics:${id}:fare`,
+        },
+        ...tariffs.map((policy) => {
+          const importer = government!.kingdoms.find(
+            (item) => item.kingdomId === policy.importKingdomId,
+          );
+          if (!importer) throw new RangeError('unknown tariff import treasury');
+          return {
+            type: 'payment' as const,
+            fromAccountId: buyer.id,
+            toAccountId: account(a, importer.treasuryAccountId).id,
+            amount: money(a, policy.amount),
+            causeId: `government:${policy.policyId}:shipment:${id}`,
+          };
+        }),
+        {
+          type: 'reserve',
+          ownerId: cityOwner(route.sourceCityId),
+          commodity: p.commodity,
+          quantity: commodity,
+          reservationId: `logistics:${id}:reservation`,
+          causeId: `logistics:${id}:reserve`,
+        },
+        {
+          type: 'depart',
+          reservationId: `logistics:${id}:reservation`,
+          shipmentId: id,
+          causeId: `logistics:${id}:depart`,
+        },
+      ];
+      const next = applyAccountingTransaction(a, operations, `logistics:${id}:depart`);
       d.accounting = next;
       l.shipments.push({
         shipmentId: id,
@@ -605,7 +714,8 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
             (item.status === 'in-transit' || item.status === 'returning'),
         )
         .reduce((n, item) => n + item.quantity, 0);
-      if (s.quantity > route.capacity - busy) throw new RangeError('route capacity exceeded');
+      if (s.quantity > effectiveCapacity(d, route, now) - busy)
+        throw new RangeError('route capacity exceeded');
       const buyer = account(initial, s.buyerAccountId),
         carrier = account(initial, s.carrierAccountId);
       d.accounting = apply(
