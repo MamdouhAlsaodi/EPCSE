@@ -23,6 +23,7 @@ export * from './services/logistics/index.js';
 export * from './services/agents/index.js';
 export * from './services/government/index.js';
 export * from './services/diplomacy/index.js';
+export * from './services/politics/index.js';
 
 export * from './world.js';
 export * from './domain.js';
