@@ -13,6 +13,9 @@ export * from './services/rng.js';
 export * from './services/phases.js';
 export * from './services/codec.js';
 export * from './shared/canonical.js';
+export * from './shared/integer.js';
+export * from './models/units.js';
+export * from './services/accounting/index.js';
 
 export * from './world.js';
 export * from './domain.js';
