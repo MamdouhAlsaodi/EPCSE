@@ -1,11 +1,31 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { runInitialTwoCities } from '../../packages/scenarios/src/initial-two-cities.js';
 import { run } from '../../apps/cli/src/main.js';
 
+// Long synchronous 100-tick runs starve Vitest's worker RPC on shared CI runners.
+// Typecheck builds this same scenario before the test step; keep its assertions
+// while running the engine in an asynchronous child process.
+async function reportAfter100Ticks(): Promise<
+  ReturnType<ReturnType<typeof runInitialTwoCities>['report']>
+> {
+  const script =
+    "import { runInitialTwoCities } from './packages/scenarios/dist/initial-two-cities.js'; console.log(JSON.stringify(runInitialTwoCities(42, 100).report()))";
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    ['--input-type=module', '-e', script],
+    {
+      timeout: 180000,
+      maxBuffer: 10 * 1024 * 1024,
+    },
+  );
+  return JSON.parse(stdout) as ReturnType<ReturnType<typeof runInitialTwoCities>['report']>;
+}
+
 describe('S0 real engine integration', () => {
-  it('runs 100 engine ticks with paid production, delayed trade, and consumption', () => {
-    const simulation = runInitialTwoCities(42, 100);
-    const report = simulation.report();
+  it('runs 100 engine ticks with paid production, delayed trade, and consumption', async () => {
+    const report = await reportAfter100Ticks();
 
     expect(report).toMatchObject({
       ticks: 100,
@@ -56,13 +76,12 @@ describe('S0 real engine integration', () => {
         }),
       ]),
     );
-  }, 60000);
+  }, 180000);
 
-  it('repeats identical state and event hashes for the same seed and commands', () => {
-    const first = runInitialTwoCities(42, 100).report();
-    const second = runInitialTwoCities(42, 100).report();
+  it('repeats identical state and event hashes for the same seed and commands', async () => {
+    const [first, second] = await Promise.all([reportAfter100Ticks(), reportAfter100Ticks()]);
     expect(second.hashes).toEqual(first.hashes);
-  }, 60000);
+  }, 180000);
 
   it('exposes a deterministic run entrypoint and rejects invalid CLI options', () => {
     expect(
