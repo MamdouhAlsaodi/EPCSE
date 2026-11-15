@@ -34,6 +34,20 @@ describe('two-city demonstration', () => {
     expect(resumed.snapshot()).toEqual(original.snapshot());
   });
 
+  it('rejects a checkpoint whose paused shipment implies a future route closure', () => {
+    const simulation = createTwoCitySimulation();
+    simulation.run(2);
+    const snapshot = simulation.snapshot();
+    (snapshot.routes as unknown as { closedRouteIds: string[] }).closedRouteIds = ['harbor-inland'];
+    (
+      snapshot.routes.shipments as unknown as {
+        arrivalTick: number;
+        pausedRemainingTicks: number;
+      }[]
+    )[0] = { ...snapshot.routes.shipments[0]!, arrivalTick: 100, pausedRemainingTicks: 2 };
+    expect(() => restoreTwoCitySimulation(snapshot)).toThrow(/shipment/i);
+  });
+
   it('resumes an in-transit snapshot with the same report as an uninterrupted run', () => {
     const uninterrupted = createTwoCitySimulation();
     uninterrupted.run(100);
