@@ -24,6 +24,8 @@ type Firm = LocalEconomyProducer & {
   cumulativeCost: number;
   cumulativeProfit: number;
   investment: { decision: 'expand' | 'hold'; reason: string; alternatives: string[] };
+  administration?: { wagePerBatch: number };
+  relocationProposal?: { cityId: string; ownerId: string; submittedTick: number } | null;
 };
 type FirmState = {
   version: 1;
@@ -197,6 +199,269 @@ export function registerFirms(engine: Engine, config: FirmsConfig): void {
       alternatives: ['expand', 'hold'],
     };
   });
+  const payForCapacity = (
+    d: Record<string, unknown>,
+    firm: Firm,
+    capacity: number,
+    cause: string,
+  ) => {
+    const a = d.accounting as AccountingState;
+    const amount = capacity * config.expansionCostPerCapacity;
+    const payer = a.accounts.find((x) => x.id === firm.accountId);
+    const recipient = a.accounts.find((x) => x.id === config.constructionAccountId);
+    if (
+      !Number.isSafeInteger(amount) ||
+      amount <= 0 ||
+      !payer ||
+      !recipient ||
+      payer.ownerId !== firm.ownerId ||
+      payer.balance < amount ||
+      recipient.balance > Number.MAX_SAFE_INTEGER - amount
+    )
+      throw new DomainCommandRejection();
+    try {
+      d.accounting = applyAccountingTransaction(
+        a,
+        [
+          {
+            type: 'payment',
+            fromAccountId: payer.id,
+            toAccountId: recipient.id,
+            amount: {
+              kind: 'money',
+              currencyId: a.currency.id,
+              unit: a.currency.unit,
+              scale: a.currency.scale,
+              minor: amount,
+            },
+            causeId: cause,
+          },
+        ],
+        cause,
+      );
+    } catch {
+      throw new DomainCommandRejection();
+    }
+  };
+  engine.registerCommandHandler('firm.build', (d, payload) => {
+    const p = payload as (Partial<LocalEconomyProducer> & { firmId?: unknown }) | null;
+    if (!p || typeof p !== 'object' || Array.isArray(p)) throw new DomainCommandRejection();
+    const id = p.firmId;
+    const fs = d.firms as FirmState | undefined,
+      a = d.accounting as AccountingState | undefined;
+    const e = d.economy as
+      | {
+          producers: Record<
+            string,
+            LocalEconomyProducer & { stopped: string | null; batches: number; employed: number }
+          >;
+        }
+      | undefined;
+    if (
+      !p ||
+      !fs ||
+      !a ||
+      !e ||
+      typeof id !== 'string' ||
+      !id.trim() ||
+      ['__proto__', 'prototype', 'constructor'].includes(id) ||
+      Object.hasOwn(fs.firms, id) ||
+      Object.hasOwn(e.producers, id) ||
+      typeof p.ownerId !== 'string' ||
+      !p.ownerId.trim() ||
+      typeof p.accountId !== 'string' ||
+      !p.accountId.trim() ||
+      typeof p.cityId !== 'string' ||
+      !p.cityId.trim() ||
+      typeof p.recipeId !== 'string' ||
+      !Number.isSafeInteger(p.laborPerBatch) ||
+      p.laborPerBatch! <= 0 ||
+      !Number.isSafeInteger(p.maxBatches) ||
+      p.maxBatches! <= 0 ||
+      p.maxBatches! > 1000 ||
+      !Number.isSafeInteger(p.wagePerBatch) ||
+      p.wagePerBatch! < 0 ||
+      (p.requiredSkills !== undefined &&
+        (!p.requiredSkills ||
+          typeof p.requiredSkills !== 'object' ||
+          Array.isArray(p.requiredSkills) ||
+          Object.entries(p.requiredSkills).some(
+            ([skill, level]) => !skill.trim() || !Number.isSafeInteger(level) || level < 0,
+          ))) ||
+      !a.owners.includes(p.ownerId) ||
+      a.accounts.find((x) => x.id === p.accountId)?.ownerId !== p.ownerId ||
+      !a.recipes.some((x) => x.id === p.recipeId) ||
+      p.accountId === config.constructionAccountId ||
+      a.accounts.find((x) => x.id === p.accountId)?.ownerId ===
+        a.accounts.find((x) => x.id === config.constructionAccountId)?.ownerId ||
+      Object.values(fs.firms).some((f) => f.ownerId === p.ownerId || f.accountId === p.accountId)
+    )
+      throw new DomainCommandRejection();
+    const producer = { ...p, id } as LocalEconomyProducer;
+    const firm = {
+      ...producer,
+      capacity: p.maxBatches!,
+      status: 'active' as const,
+      employment: 0,
+      insolvencyTicks: 0,
+      closureReason: null,
+      closureTick: null,
+      capitalOutlayThisTick: 0,
+      cumulativeCapitalOutlay: 0,
+      revenueThisTick: 0,
+      costThisTick: 0,
+      profitThisTick: 0,
+      cumulativeRevenue: 0,
+      cumulativeCost: 0,
+      cumulativeProfit: 0,
+      investment: {
+        decision: 'hold' as const,
+        reason: 'new construction',
+        alternatives: ['expand', 'hold'],
+      },
+      administration: { wagePerBatch: p.wagePerBatch! },
+      relocationProposal: null,
+    } as Firm;
+    payForCapacity(d, firm, p.maxBatches!, `firm-build:${id}:${engine.getState().tick + 1}`);
+    fs.firms[id] = firm;
+    e.producers[id] = {
+      ...producer,
+      requiredSkills: p.requiredSkills ?? {},
+      stopped: null,
+      batches: 0,
+      employed: 0,
+    } as (typeof e.producers)[string];
+  });
+  engine.registerCommandHandler('firm.upgrade', (d, payload) => {
+    const p = payload as { firmId?: unknown; ownerId?: unknown; capacity?: unknown };
+    const fs = d.firms as FirmState | undefined,
+      firm = fs?.firms[String(p?.firmId)];
+    if (
+      !firm ||
+      p.ownerId !== firm.ownerId ||
+      !Number.isSafeInteger(p.capacity) ||
+      (p.capacity as number) <= 0 ||
+      firm.status !== 'active' ||
+      firm.capacity > 1000 - (p.capacity as number)
+    )
+      throw new DomainCommandRejection();
+    payForCapacity(
+      d,
+      firm,
+      p.capacity as number,
+      `firm-upgrade:${firm.id}:${engine.getState().tick + 1}`,
+    );
+    firm.capacity += p.capacity as number;
+  });
+  engine.registerCommandHandler('firm.administration', (d, payload) => {
+    const p = payload as { firmId?: unknown; ownerId?: unknown; wagePerBatch?: unknown };
+    const fs = d.firms as FirmState | undefined,
+      e = d.economy as { producers: Record<string, { wagePerBatch: number }> } | undefined,
+      firm = fs?.firms[String(p?.firmId)];
+    if (
+      !firm ||
+      !e?.producers[firm.id] ||
+      p.ownerId !== firm.ownerId ||
+      !Number.isSafeInteger(p.wagePerBatch) ||
+      (p.wagePerBatch as number) < 0 ||
+      firm.status !== 'active'
+    )
+      throw new DomainCommandRejection();
+    e.producers[firm.id]!.wagePerBatch = p.wagePerBatch as number;
+    firm.wagePerBatch = p.wagePerBatch as number;
+    firm.administration = { wagePerBatch: p.wagePerBatch as number };
+  });
+  engine.registerCommandHandler('firm.price', (d, payload) => {
+    const p = (payload ?? {}) as {
+      firmId?: unknown;
+      ownerId?: unknown;
+      commodity?: unknown;
+      minPrice?: unknown;
+      maxPrice?: unknown;
+      openingPrice?: unknown;
+    };
+    const firm = (d.firms as FirmState | undefined)?.firms[String(p?.firmId)],
+      e = d.economy as
+        | {
+            sellers: Record<
+              string,
+              {
+                cityId: string;
+                ownerId: string;
+                accountId: string;
+                commodity: string;
+                minPrice: number;
+                maxPrice: number;
+                openingPrice: number;
+                price: number;
+                reason: string;
+              }
+            >;
+          }
+        | undefined;
+    const sellers = Object.values(e?.sellers ?? {}).filter(
+      (s) =>
+        s.cityId === firm?.cityId &&
+        s.ownerId === firm?.ownerId &&
+        s.accountId === firm?.accountId &&
+        s.commodity === p.commodity,
+    );
+    if (
+      !firm ||
+      p.ownerId !== firm.ownerId ||
+      !sellers.length ||
+      ![p.minPrice, p.maxPrice, p.openingPrice].every(Number.isSafeInteger) ||
+      (p.minPrice as number) <= 0 ||
+      (p.maxPrice as number) < (p.minPrice as number) ||
+      (p.openingPrice as number) < (p.minPrice as number) ||
+      (p.openingPrice as number) > (p.maxPrice as number)
+    )
+      throw new DomainCommandRejection();
+    for (const seller of sellers)
+      Object.assign(seller, {
+        minPrice: p.minPrice as number,
+        maxPrice: p.maxPrice as number,
+        openingPrice: p.openingPrice as number,
+        price: p.openingPrice as number,
+        reason: 'owner-price-command',
+      });
+  });
+  engine.registerCommandHandler('firm.relocation.propose', (d, payload) => {
+    const p = payload as { firmId?: unknown; ownerId?: unknown; cityId?: unknown };
+    const firm = (d.firms as FirmState | undefined)?.firms[String(p?.firmId)];
+    const cityState = d.cities as { cities?: Record<string, unknown> } | undefined;
+    const economy = d.economy as
+      | {
+          producers?: Record<string, { cityId?: unknown }>;
+          configCohorts?: Record<string, { cityId?: unknown }>;
+          sellers?: Record<string, { cityId?: unknown }>;
+        }
+      | undefined;
+    const knownCities = cityState?.cities
+      ? new Set(Object.keys(cityState.cities))
+      : new Set(
+          [
+            ...Object.values(economy?.producers ?? {}).map((x) => x.cityId),
+            ...Object.values(economy?.configCohorts ?? {}).map((x) => x.cityId),
+            ...Object.values(economy?.sellers ?? {}).map((x) => x.cityId),
+          ].filter((cityId): cityId is string => typeof cityId === 'string'),
+        );
+    if (
+      !firm ||
+      p.ownerId !== firm.ownerId ||
+      typeof p.cityId !== 'string' ||
+      !p.cityId.trim() ||
+      p.cityId === firm.cityId ||
+      !knownCities.has(p.cityId) ||
+      ['__proto__', 'prototype', 'constructor'].includes(p.cityId)
+    )
+      throw new DomainCommandRejection();
+    firm.relocationProposal = {
+      cityId: p.cityId,
+      ownerId: firm.ownerId,
+      submittedTick: engine.getState().tick + 1,
+    };
+  });
   engine.registerCommandHandler('firm.close', (d, payload) => {
     const p = payload as { firmId?: unknown; ownerId?: unknown };
     const firm = (d.firms as FirmState | undefined)?.firms[String(p?.firmId)];
@@ -212,8 +477,8 @@ export function registerFirms(engine: Engine, config: FirmsConfig): void {
     const economy = d.economy as
       { producers: Record<string, { stopped: string | null }> } | undefined;
     if (!fs || !economy) return;
-    for (const producer of producers) {
-      const firm = fs.firms[producer.id]!;
+    for (const firm of Object.values(fs.firms)) {
+      const producer = firm;
       if (firm.status !== 'active') continue;
       const qualifies =
         producer.wagePerBatch > 0 && economy.producers[producer.id]?.stopped === 'no-liquidity';
@@ -239,7 +504,12 @@ export function registerFirms(engine: Engine, config: FirmsConfig): void {
         if (!effect || !Number.isSafeInteger(effect.amount)) continue;
         if (entry.causeId.startsWith(`wage:${f.id}:`) && effect.debit === f.accountId)
           f.costThisTick += effect.amount!;
-        if (entry.causeId.startsWith(`firm-expansion:${f.id}:`) && effect.debit === f.accountId) {
+        if (
+          (entry.causeId.startsWith(`firm-expansion:${f.id}:`) ||
+            entry.causeId.startsWith(`firm-build:${f.id}:`) ||
+            entry.causeId.startsWith(`firm-upgrade:${f.id}:`)) &&
+          effect.debit === f.accountId
+        ) {
           f.capitalOutlayThisTick += effect.amount!;
           f.cumulativeCapitalOutlay += effect.amount!;
         }
@@ -268,10 +538,28 @@ export function registerFirms(engine: Engine, config: FirmsConfig): void {
     if (
       fs.version !== 1 ||
       fs.configDigest !== configDigest ||
-      Object.keys(fs.firms).length !== producers.length
+      producers.some((producer) => !fs.firms[producer.id])
     )
       throw new TypeError('invalid firms state');
-    for (const firm of Object.values(fs.firms))
+    const ledger = d.accounting as AccountingState | undefined;
+    const economy = d.economy as { producers?: Record<string, LocalEconomyProducer> } | undefined;
+    if (
+      !ledger ||
+      !economy?.producers ||
+      Object.keys(fs.firms).length !== Object.keys(economy.producers).length
+    )
+      throw new TypeError('firm/economy identities diverged');
+    for (const [id, firm] of Object.entries(fs.firms)) {
+      const producer = economy.producers[id];
+      if (
+        !producer ||
+        producer.ownerId !== firm.ownerId ||
+        producer.accountId !== firm.accountId ||
+        producer.cityId !== firm.cityId ||
+        producer.recipeId !== firm.recipeId ||
+        ledger.accounts.find((account) => account.id === firm.accountId)?.ownerId !== firm.ownerId
+      )
+        throw new TypeError('invalid live firm identity');
       if (
         !Number.isSafeInteger(firm.capacity) ||
         firm.capacity < 0 ||
@@ -292,5 +580,6 @@ export function registerFirms(engine: Engine, config: FirmsConfig): void {
         (firm.status !== 'active' && (firm.closureReason === null || firm.closureTick === null))
       )
         throw new RangeError('invalid firm lifecycle state');
+    }
   });
 }
