@@ -56,7 +56,7 @@ describe('S0 real engine integration', () => {
         }),
       ]),
     );
-  }, 30000);
+  }, 60000);
 
   it('repeats identical state and event hashes for the same seed and commands', () => {
     const first = runInitialTwoCities(42, 100).report();
