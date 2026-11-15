@@ -641,3 +641,6 @@ export function runTwoCityScenario(): TwoCityReport {
   simulation.run(100);
   return simulation.report();
 }
+
+export { runMultiCityRerouteDemo } from './multicity-reroute.js';
+export type { MultiCityRerouteReport } from './multicity-reroute.js';
