@@ -46,8 +46,12 @@ jobs:
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import { spawnSync } from 'node:child_process';
-          const result = spawnSync(process.execPath, ['apps/cli/dist/main.js', 'run', '--scenario', 'vertical-slice', '--seed', '42', '--ticks', '1000'], { encoding: 'utf8', timeout: 1800000 });
+          const args = ['apps/cli/dist/main.js', 'run', '--scenario', 'vertical-slice', '--seed', '42', '--ticks', '1000'];
+          const result = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 1800000 });
+          const repeated = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 1800000 });
           assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+          assert.equal(repeated.status, 0, repeated.error?.message ?? repeated.stderr);
+          assert.equal(result.stdout, repeated.stdout, '1000-tick built VS CLI reports differ');
           assert.match(result.stdout, /fixture v1/);
           assert.match(result.stdout, /1000 ticks/);
           assert.match(result.stdout, /funded intervention paid \(10 coin debited\)/);
