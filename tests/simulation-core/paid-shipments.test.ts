@@ -28,6 +28,586 @@ const makeShipmentSystem = () => {
 };
 
 describe('paid shipments', () => {
+  it('reroutes a paid blocked shipment to an open route for an additional fee', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 5 }],
+    });
+    const money = createMoneyLedger({
+      accounts: ['buyer-cash', 'seller-cash'],
+      balances: [{ accountId: 'buyer-cash', amount: 50 }],
+    });
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes: [
+        {
+          routeId: 'road',
+          sourceCityId: 'north',
+          destinationCityId: 'south',
+          travelTicks: 4,
+          capacity: 2,
+        },
+        {
+          routeId: 'river',
+          sourceCityId: 'north',
+          destinationCityId: 'east',
+          travelTicks: 3,
+          capacity: 2,
+        },
+      ],
+    });
+    const coordinator = createPaidShipmentCoordinator({ inventory, money, network });
+    coordinator.depart({
+      shipment: { shipmentId: 'rerouted', routeId: 'road', commodity: 'grain', quantity: 2 },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 10,
+    });
+    network.advanceTick();
+    network.blockRoute('road');
+    network.advanceTick();
+    network.advanceTick();
+
+    coordinator.reroute({ shipmentId: 'rerouted', routeId: 'river', payment: 7 });
+
+    expect(network.getState().shipments[0]).toMatchObject({
+      routeId: 'river',
+      status: 'in-transit',
+      arrivalTick: 9,
+    });
+    network.blockRoute('river');
+    const blockedSnapshot = network.getState();
+    const blockedInventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [
+        { ownerId: 'north', commodity: 'grain', quantity: 3 },
+        { ownerId: 'transit', commodity: 'grain', quantity: 2 },
+      ],
+    });
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory: blockedInventory,
+        routes: blockedSnapshot.routes,
+        initialState: blockedSnapshot,
+      }),
+    ).not.toThrow();
+    const blockedAfterReroute = network.getState();
+    expect(() => network.returnBlockedShipment('rerouted')).toThrow(/rerout|eligible/i);
+    expect(network.getState()).toEqual(blockedAfterReroute);
+    network.releaseBlock('river');
+    expect(money.getState().balances).toEqual([
+      { accountId: 'buyer-cash', amount: 33 },
+      { accountId: 'seller-cash', amount: 17 },
+    ]);
+    expect(inventory.getState().balances).toContainEqual({
+      ownerId: 'transit',
+      commodity: 'grain',
+      quantity: 2,
+    });
+    network.closeRoute('river');
+    network.advanceTick();
+    network.openRoute('river');
+    expect(network.getState().shipments[0]?.arrivalTick).toBe(10);
+    const snapshot = network.getState();
+    const tampered = {
+      ...snapshot,
+      shipments: snapshot.shipments.map((shipment) => ({
+        ...shipment,
+        rerouteRemainingTicks: shipment.rerouteRemainingTicks! + 1,
+        arrivalTick: shipment.arrivalTick + 1,
+      })),
+    };
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: snapshot.routes,
+        initialState: tampered,
+      }),
+    ).toThrow(/reroute|shipment/i);
+    const malformedPaid = {
+      ...snapshot,
+      shipments: snapshot.shipments.map((shipment) => ({
+        ...shipment,
+        buyerAccountId: undefined,
+      })),
+    };
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: snapshot.routes,
+        initialState: malformedPaid,
+      }),
+    ).toThrow(/payment|provenance/i);
+    const outOfOrder = {
+      ...snapshot,
+      shipments: snapshot.shipments.map((shipment) => ({
+        ...shipment,
+        rerouteBlockedAtTick: shipment.reroutedAtTick! + 1,
+      })),
+    };
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes: snapshot.routes,
+        initialState: outOfOrder,
+      }),
+    ).toThrow(/shipment|provenance/i);
+    const restoredInventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [
+        { ownerId: 'north', commodity: 'grain', quantity: 3 },
+        { ownerId: 'transit', commodity: 'grain', quantity: 2 },
+      ],
+    });
+    const restored = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory: restoredInventory,
+      routes: snapshot.routes,
+      initialState: snapshot,
+    });
+    expect(restored.getState()).toEqual(snapshot);
+    while (network.getState().tick < 10) network.advanceTick();
+    while (restored.getState().tick < 10) restored.advanceTick();
+    expect(restored.getState()).toEqual(network.getState());
+    expect(restoredInventory.getState().balances).toEqual(inventory.getState().balances);
+  });
+
+  it('preserves active-time chronology after close, reopen, then block and reroute', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 2 }],
+    });
+    const money = createMoneyLedger({
+      accounts: ['buyer-cash', 'seller-cash'],
+      balances: [{ accountId: 'buyer-cash', amount: 20 }],
+    });
+    const routes = [
+      { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 5 },
+      { routeId: 'river', sourceCityId: 'north', destinationCityId: 'east', travelTicks: 2 },
+    ];
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes,
+    });
+    const coordinator = createPaidShipmentCoordinator({ inventory, money, network });
+    coordinator.depart({
+      shipment: { shipmentId: 'chronology', routeId: 'road', commodity: 'grain', quantity: 1 },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 2,
+    });
+    network.advanceTick();
+    network.closeRoute('road');
+    network.advanceTick();
+    network.openRoute('road');
+    network.advanceTick();
+    network.blockRoute('road');
+    network.advanceTick();
+    coordinator.reroute({ shipmentId: 'chronology', routeId: 'river', payment: 1 });
+    const state = network.getState();
+    const restoredInventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'transit', commodity: 'grain', quantity: 1 }],
+    });
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory: restoredInventory,
+        routes,
+        initialState: state,
+      }),
+    ).not.toThrow();
+  });
+
+  it('attacks a rerouted journey after original travel exceeds the alternative duration', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const money = createMoneyLedger({
+      accounts: ['buyer-cash', 'seller-cash'],
+      balances: [{ accountId: 'buyer-cash', amount: 20 }],
+    });
+    const routes = [
+      { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 5 },
+      { routeId: 'river', sourceCityId: 'north', destinationCityId: 'east', travelTicks: 2 },
+    ];
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes,
+    });
+    const coordinator = createPaidShipmentCoordinator({ inventory, money, network });
+    coordinator.depart({
+      shipment: { shipmentId: 'late-attack', routeId: 'road', commodity: 'grain', quantity: 1 },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 2,
+    });
+    for (let i = 0; i < 4; i += 1) network.advanceTick();
+    network.blockRoute('road');
+    coordinator.reroute({ shipmentId: 'late-attack', routeId: 'river', payment: 1 });
+
+    const returning = network.attackRoute('river');
+    expect(returning.shipments[0]).toMatchObject({
+      status: 'returning',
+      attackTick: 4,
+      returnDueTick: 8,
+    });
+    const corruptReturning = {
+      ...returning,
+      shipments: returning.shipments.map((shipment) => ({
+        ...shipment,
+        reroutedFromRouteId: 'missing-original-route',
+      })),
+    };
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes,
+        initialState: corruptReturning,
+      }),
+    ).toThrow(/invalid initial shipment state|provenance/i);
+    const restoredInventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'transit', commodity: 'grain', quantity: 1 }],
+    });
+    const restored = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory: restoredInventory,
+      routes,
+      initialState: returning,
+    });
+    while (restored.getState().tick < 8) restored.advanceTick();
+    expect(restored.getState().shipments[0]?.status).toBe('returned');
+    expect(restoredInventory.getState().balances).toContainEqual({
+      ownerId: 'north',
+      commodity: 'grain',
+      quantity: 1,
+    });
+  });
+
+  it('excludes alternative-route closure waiting from rerouted attack travel time', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const money = createMoneyLedger({
+      accounts: ['buyer-cash', 'seller-cash'],
+      balances: [{ accountId: 'buyer-cash', amount: 20 }],
+    });
+    const routes = [
+      { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 5 },
+      { routeId: 'river', sourceCityId: 'north', destinationCityId: 'east', travelTicks: 2 },
+    ];
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes,
+    });
+    const coordinator = createPaidShipmentCoordinator({ inventory, money, network });
+    coordinator.depart({
+      shipment: { shipmentId: 'waiting-attack', routeId: 'road', commodity: 'grain', quantity: 1 },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 2,
+    });
+    network.advanceTick();
+    network.blockRoute('road');
+    coordinator.reroute({ shipmentId: 'waiting-attack', routeId: 'river', payment: 1 });
+    network.closeRoute('river');
+    network.advanceTick();
+    network.advanceTick();
+    network.advanceTick();
+    network.openRoute('river');
+    network.advanceTick();
+
+    const attacked = network.attackRoute('river');
+    expect(attacked.shipments[0]).toMatchObject({
+      status: 'returning',
+      attackTick: 5,
+      returnDueTick: 7,
+    });
+    expect(attacked.shipments[0]?.rerouteOriginalDepartureTick).toBe(0);
+    expect(attacked.shipments[0]?.rerouteBlockedAtTick).toBe(1);
+  });
+
+  it('attacks a rerouted journey using cumulative active outbound time', () => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 1 }],
+    });
+    const money = createMoneyLedger({
+      accounts: ['buyer-cash', 'seller-cash'],
+      balances: [{ accountId: 'buyer-cash', amount: 20 }],
+    });
+    const routes = [
+      { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 4 },
+      { routeId: 'river', sourceCityId: 'north', destinationCityId: 'east', travelTicks: 3 },
+    ];
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes,
+    });
+    const coordinator = createPaidShipmentCoordinator({ inventory, money, network });
+    coordinator.depart({
+      shipment: {
+        shipmentId: 'attacked-reroute',
+        routeId: 'road',
+        commodity: 'grain',
+        quantity: 1,
+      },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 2,
+    });
+    network.advanceTick();
+    network.blockRoute('road');
+    coordinator.reroute({ shipmentId: 'attacked-reroute', routeId: 'river', payment: 1 });
+    const snapshot = network.attackRoute('river');
+    expect(snapshot.shipments[0]).toMatchObject({
+      status: 'returning',
+      attackTick: 1,
+      returnDueTick: 2,
+    });
+    const restoredInventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'transit', commodity: 'grain', quantity: 1 }],
+    });
+    expect(() =>
+      createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory: restoredInventory,
+        routes,
+        initialState: snapshot,
+      }),
+    ).not.toThrow();
+  });
+
+  it('does not accept forged paid provenance through public depart properties', () => {
+    const { network, coordinator } = makeShipmentSystem();
+    network.depart({
+      shipmentId: 'forged',
+      routeId: 'road',
+      commodity: 'grain',
+      quantity: 1,
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      originalPayment: 1,
+      reroutedFromRouteId: 'road',
+      reroutedAtTick: 0,
+      rerouteRemainingTicks: 1,
+    } as never);
+    network.blockRoute('road');
+
+    expect(network.getState().shipments[0]).not.toHaveProperty('buyerAccountId');
+    expect(() =>
+      coordinator.reroute({ shipmentId: 'forged', routeId: 'road', payment: 1 }),
+    ).toThrow(/unpaid|paid provenance/i);
+  });
+
+  it('sanitizes runtime-only reroute fields supplied to paid departure', () => {
+    const { network, coordinator } = makeShipmentSystem();
+    coordinator.depart({
+      shipment: {
+        shipmentId: 'injected',
+        routeId: 'road',
+        commodity: 'grain',
+        quantity: 1,
+        reroutedFromRouteId: 'road',
+        reroutedAtTick: 0,
+        rerouteRemainingTicks: 1,
+      } as never,
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 2,
+    });
+    expect(network.getState().shipments[0]).not.toHaveProperty('reroutedFromRouteId');
+  });
+
+  it.each([
+    ['unknown alternative route', 'missing', undefined],
+    ['wrong alternative source', 'wrong-source', undefined],
+    ['same alternative destination', 'same-destination', undefined],
+    ['closed alternative route', 'river', 'closed'],
+    ['blocked alternative route', 'river', 'blocked'],
+    ['attacked alternative route', 'river', 'attacked'],
+  ])('rejects %s without changing built-in participants', (_label, alternativeId, obstruction) => {
+    const inventory = createInventory({
+      owners: ['north', 'south', 'east', 'transit'],
+      balances: [{ ownerId: 'north', commodity: 'grain', quantity: 2 }],
+    });
+    const money = createMoneyLedger({
+      accounts: ['buyer-cash', 'seller-cash'],
+      balances: [{ accountId: 'buyer-cash', amount: 20 }],
+    });
+    const routes = [
+      { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 3 },
+      { routeId: 'river', sourceCityId: 'north', destinationCityId: 'east', travelTicks: 2 },
+      { routeId: 'wrong-source', sourceCityId: 'south', destinationCityId: 'east', travelTicks: 2 },
+      {
+        routeId: 'same-destination',
+        sourceCityId: 'north',
+        destinationCityId: 'south',
+        travelTicks: 2,
+      },
+    ];
+    const network = createRouteNetwork({
+      cityIds: ['north', 'south', 'east'],
+      transitOwnerId: 'transit',
+      inventory,
+      routes,
+    });
+    const coordinator = createPaidShipmentCoordinator({ inventory, money, network });
+    coordinator.depart({
+      shipment: { shipmentId: 'matrix', routeId: 'road', commodity: 'grain', quantity: 1 },
+      buyerAccountId: 'buyer-cash',
+      sellerAccountId: 'seller-cash',
+      payment: 2,
+    });
+    network.advanceTick();
+    network.blockRoute('road');
+    if (obstruction === 'closed') network.closeRoute('river');
+    if (obstruction === 'blocked') network.blockRoute('river');
+    if (obstruction === 'attacked') network.attackRoute('river');
+    const before = {
+      inventory: inventory.getState(),
+      money: money.getState(),
+      network: network.getState(),
+    };
+
+    expect(() =>
+      coordinator.reroute({ shipmentId: 'matrix', routeId: alternativeId, payment: 1 }),
+    ).toThrow();
+    expect(inventory.getState()).toEqual(before.inventory);
+    expect(money.getState()).toEqual(before.money);
+    expect(network.getState()).toEqual(before.network);
+  });
+
+  it('rejects reroute capacity, insufficient-funds, seller-overflow, repeated-choice and unsafe-tick failures without mutation', () => {
+    const runFailure = (failure: string) => {
+      const maximum = Number.MAX_SAFE_INTEGER;
+      const unsafeTick = failure === 'unsafe tick' ? maximum - 10 : 0;
+      const inventory = createInventory({
+        owners: ['north', 'south', 'east', 'transit'],
+        balances: [{ ownerId: 'north', commodity: 'grain', quantity: 3 }],
+      });
+      const money = createMoneyLedger({
+        accounts: ['buyer-cash', 'seller-cash'],
+        balances: [
+          { accountId: 'buyer-cash', amount: failure === 'insufficient funds' ? 1 : 20 },
+          {
+            accountId: 'seller-cash',
+            amount: failure === 'seller overflow' ? maximum - 2 : 0,
+          },
+        ],
+      });
+      const routes = [
+        { routeId: 'road', sourceCityId: 'north', destinationCityId: 'south', travelTicks: 5 },
+        {
+          routeId: 'river',
+          sourceCityId: 'north',
+          destinationCityId: 'east',
+          travelTicks: failure === 'unsafe tick' ? 10 : 2,
+          ...(failure === 'capacity' ? { capacity: 1 } : {}),
+        },
+      ];
+      const network = createRouteNetwork({
+        cityIds: ['north', 'south', 'east'],
+        transitOwnerId: 'transit',
+        inventory,
+        routes,
+        ...(unsafeTick > 0 ? { initialState: { tick: unsafeTick, routes, shipments: [] } } : {}),
+      });
+      const coordinator = createPaidShipmentCoordinator({ inventory, money, network });
+      if (failure === 'capacity') {
+        coordinator.depart({
+          shipment: { shipmentId: 'occupier', routeId: 'river', commodity: 'grain', quantity: 1 },
+          buyerAccountId: 'buyer-cash',
+          sellerAccountId: 'seller-cash',
+          payment: 1,
+        });
+      }
+      coordinator.depart({
+        shipment: { shipmentId: 'matrix', routeId: 'road', commodity: 'grain', quantity: 1 },
+        buyerAccountId: 'buyer-cash',
+        sellerAccountId: 'seller-cash',
+        payment: failure === 'seller overflow' ? 2 : 1,
+      });
+      const ticks = failure === 'unsafe tick' ? 4 : 1;
+      for (let i = 0; i < ticks; i += 1) network.advanceTick();
+      network.blockRoute('road');
+      if (failure === 'unsafe tick') {
+        // The current tick and remaining original time leave no safe room for the alternative.
+      }
+      if (failure === 'repeated choice')
+        coordinator.reroute({ shipmentId: 'matrix', routeId: 'river', payment: 1 });
+      const before = {
+        inventory: inventory.getState(),
+        money: money.getState(),
+        network: network.getState(),
+      };
+      const expectFailure = () =>
+        coordinator.reroute({ shipmentId: 'matrix', routeId: 'river', payment: 1 });
+      try {
+        expect(expectFailure).toThrow();
+      } catch {
+        throw new Error(`expected ${failure} reroute rejection`);
+      }
+      expect(inventory.getState()).toEqual(before.inventory);
+      expect(money.getState()).toEqual(before.money);
+      expect(network.getState()).toEqual(before.network);
+    };
+
+    for (const failure of [
+      'capacity',
+      'insufficient funds',
+      'seller overflow',
+      'repeated choice',
+      'unsafe tick',
+    ])
+      runFailure(failure);
+  });
+
+  it('rejects rerouting an unpaid held shipment without mutation', () => {
+    const { inventory, money, network, coordinator } = makeShipmentSystem();
+    network.depart({ shipmentId: 'unpaid', routeId: 'road', commodity: 'grain', quantity: 1 });
+    network.blockRoute('road');
+    const before = {
+      inventory: inventory.getState(),
+      money: money.getState(),
+      network: network.getState(),
+    };
+    expect(() =>
+      coordinator.reroute({ shipmentId: 'unpaid', routeId: 'road', payment: 5 }),
+    ).toThrow(/unpaid|paid provenance/i);
+    expect(inventory.getState()).toEqual(before.inventory);
+    expect(money.getState()).toEqual(before.money);
+    expect(network.getState()).toEqual(before.network);
+  });
+
   it('keeps the settled fee when an attacked paid shipment returns to its source', () => {
     const { inventory, money, network, coordinator } = makeShipmentSystem();
     coordinator.depart({
