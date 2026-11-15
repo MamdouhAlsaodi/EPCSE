@@ -9,6 +9,7 @@ import {
 import { DomainCommandRejection } from '../../models/commands.js';
 import type { CommodityQuantity, MoneyUnit } from '../../models/units.js';
 import { hash } from '../../shared/canonical.js';
+import { hasBilateralTradePermit } from '../diplomacy/index.js';
 import {
   activeOutwardElapsedTicks,
   isPaidObstructionRerouteEligible,
@@ -31,6 +32,8 @@ export interface LogisticsConfig extends Omit<AccountingConfig, 'stock'> {
   readonly transitOwnerId: string;
   readonly cities: readonly string[];
   readonly cityOwnerIds?: Readonly<Record<string, string>>;
+  /** Authoritative city-to-kingdom mapping for cross-kingdom shipment consent. */
+  readonly cityKingdomIds?: Readonly<Record<string, string>>;
   readonly routes: readonly LogisticsRoute[];
 }
 type Status = 'in-transit' | 'arrived' | 'returning' | 'returned';
@@ -110,6 +113,13 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
     Object.keys(safe.cityOwnerIds).some((city) => !safe.cities.includes(city))
   )
     throw new RangeError('unknown city owner mapping');
+  if (safe.cityKingdomIds && safe.cities.some((city) => !nonempty(safe.cityKingdomIds?.[city])))
+    throw new RangeError('every city requires an authoritative kingdom mapping');
+  if (
+    safe.cityKingdomIds &&
+    Object.keys(safe.cityKingdomIds).some((city) => !safe.cities.includes(city))
+  )
+    throw new RangeError('unknown city kingdom mapping');
   for (const city of safe.cities)
     if (!safe.owners.includes(cityOwner(city))) throw new RangeError('invalid city owner mapping');
   const routeIds = new Set<string>();
@@ -287,6 +297,23 @@ export function registerLogistics(engine: Engine, config: LogisticsConfig): void
         };
       const route = requireRoute(l, p?.routeId),
         now = l.tick + 1;
+      const sourceKingdom = safe.cityKingdomIds?.[route.sourceCityId];
+      const destinationKingdom = safe.cityKingdomIds?.[route.destinationCityId];
+      if (d.diplomacy && (!sourceKingdom || !destinationKingdom))
+        throw new RangeError('city kingdom mapping required when diplomacy is registered');
+      if (
+        sourceKingdom &&
+        destinationKingdom &&
+        sourceKingdom !== destinationKingdom &&
+        !hasBilateralTradePermit(
+          d,
+          route.routeId,
+          String(p?.commodity),
+          sourceKingdom,
+          destinationKingdom,
+        )
+      )
+        throw new RangeError('bilateral trade permit is not accepted');
       if (
         !nonempty(p.shipmentId) ||
         !nonempty(p.buyerAccountId) ||
