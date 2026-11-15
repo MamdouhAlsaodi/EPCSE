@@ -17,6 +17,7 @@ export * from './shared/integer.js';
 export * from './models/units.js';
 export * from './services/accounting/index.js';
 export * from './services/economy/index.js';
+export * from './services/firms/index.js';
 export * from './services/cities/index.js';
 export * from './services/logistics/index.js';
 export * from './services/agents/index.js';
