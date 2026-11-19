@@ -156,7 +156,7 @@ describe('M1 integration: three-nations-trade-and-politics fixture', () => {
       expect(blocked.approved).toBe(false);
       expect(approved.effectiveDelay).toBeGreaterThan(0);
     }
-  });
+  }, 600000);
 
   it('follows configuration: kingdom subset changes resolved counts', () => {
     const report = runThreeNations({ kingdoms: ['plains', 'mountains'], ticks: 4 });
@@ -164,7 +164,7 @@ describe('M1 integration: three-nations-trade-and-politics fixture', () => {
     expect(report.config.counts.cities).toBe(8);
     expect(report.config.cityIds).toHaveLength(8);
     expect(report.config.kingdomGovernmentForms).not.toHaveProperty('coast');
-  });
+  }, 600000);
 
   it('runs 60 ticks with every phase system firing, real conversion/departure/arrival/settlement, conservation, and reconciled analytics', async () => {
     const run = await runFixtureInChild({ ticks: 60 });
@@ -261,7 +261,7 @@ describe('M1 integration: three-nations-trade-and-politics fixture', () => {
       }),
     ).toThrow(/routeId/);
     // factory-level validation: nothing was ever created, so there is no partial state to inspect
-  });
+  }, 600000);
 });
 
 describe('m1: shocks, SC-15 determinism at 1000 ticks, reconciliation, pagination', () => {

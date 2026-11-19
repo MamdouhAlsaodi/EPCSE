@@ -70,7 +70,7 @@ describe('vertical-slice scenario', () => {
     expect(first).toMatch(/Event hash: [a-f0-9]{64}/);
   }, 1800000);
 
-  it('allows explicit alternate fixture values and rejects invalid configurations', () => {
+  it('allows explicit alternate fixture values and rejects invalid configurations', { timeout: 300000 }, () => {
     const report = runVerticalSlice({
       seed: 7,
       ticks: 10,

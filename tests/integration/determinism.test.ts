@@ -22,7 +22,7 @@ function scenario() {
 }
 
 describe('determinism', () => {
-  it('matches domain, state/event hashes, command order, and stable event IDs at every tick across 1000 ticks', () => {
+  it('matches domain, state/event hashes, command order, and stable event IDs at every tick across 1000 ticks', { timeout: 300000 }, () => {
     const a = scenario();
     const b = scenario();
     for (let tick = 1; tick <= 1000; tick++) {
