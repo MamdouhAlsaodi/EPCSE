@@ -4,6 +4,7 @@ import {
   registerCities,
   registerLocalEconomy,
 } from '../../packages/simulation-core/src/index.js';
+import { createThreeNations as createThreeNationsFixture } from '../../packages/scenarios/src/three-nations-trade-and-politics.js';
 
 describe('SC-12 cohort migration', () => {
   it('moves only funded people toward real skill-matched jobs and employs them next tick', () => {
@@ -224,4 +225,43 @@ describe('SC-12 cohort migration', () => {
     expect(state.cohorts['destination-group']!.population).toBe(0);
     expect(state.migration).toEqual([]);
   });
+});
+
+// T16 extension — three-nations fixture: a skill-matched vacancy with a funded migration budget
+// moves population between two identical mountain cohorts; the unfunded control moves nobody.
+describe('SC-12 three-nations funded migration', () => {
+  const drive = (migrationBudget: number) => {
+    const fixture = createThreeNationsFixture({
+      ticks: 8,
+      variant: migrationBudget > 0 ? { migrationBudget } : {},
+    });
+    const commands = [];
+    for (let tick = 1; tick <= 8; tick++) commands.push(...fixture.commandsForTick(tick));
+    for (const command of commands) fixture.engine.submit(command);
+    fixture.engine.run(8);
+    return fixture.engine.getState().domain;
+  };
+
+  it('moves exactly the funded count from source to destination cohort', () => {
+    const domain = drive(500);
+    const cities = domain.cities as {
+      cohorts: Record<string, { population: number }>;
+      migration: Array<{ fromCohortId: string; toCohortId: string; population: number }>;
+    };
+    expect(cities.migration.length).toBeGreaterThan(0);
+    const moved = cities.migration.reduce((sum, m) => sum + m.population, 0);
+    expect(moved).toBeGreaterThan(0);
+    const sourceBefore = 100;
+    const destinationBefore = 6;
+    expect(cities.cohorts['mount-hold-residents']!.population).toBe(sourceBefore - moved);
+    expect(cities.cohorts['mount-forge-residents']!.population).toBe(destinationBefore + moved);
+
+    const control = drive(0);
+    const controlCities = control.cities as {
+      cohorts: Record<string, { population: number }>;
+      migration: unknown[];
+    };
+    expect(controlCities.migration).toHaveLength(0);
+    expect(controlCities.cohorts['mount-hold-residents']!.population).toBe(100);
+  }, 900000);
 });

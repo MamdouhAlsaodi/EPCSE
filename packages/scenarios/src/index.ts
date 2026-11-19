@@ -648,3 +648,16 @@ export { runInitialTwoCities } from './initial-two-cities.js';
 export type { InitialTwoCitiesReport } from './initial-two-cities.js';
 export { runVerticalSlice, verticalSliceSummary } from './vertical-slice.js';
 export type { VerticalSliceOptions, VerticalSliceReport } from './vertical-slice.js';
+export {
+  THREE_NATIONS_FIXTURE_VERSION,
+  createThreeNations,
+  runThreeNations,
+  threeNationsSummary,
+} from './three-nations-trade-and-politics.js';
+export type {
+  ThreeNationsOptions,
+  ThreeNationsReport,
+  ThreeNationsShock,
+  ThreeNationsVariant,
+  ResolvedThreeNationsConfig,
+} from './three-nations-trade-and-politics.js';

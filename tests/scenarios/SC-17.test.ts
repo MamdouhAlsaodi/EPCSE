@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import {
   createEngine,
@@ -5,6 +7,7 @@ import {
   registerLocalEconomy,
   type CityConfig,
 } from '../../packages/simulation-core/src/index.js';
+import { createThreeNations as createThreeNationsFixture } from '../../packages/scenarios/src/three-nations-trade-and-politics.js';
 
 const economy = {
   currency: { id: 'coin', unit: 'cent', scale: 0 },
@@ -159,4 +162,61 @@ describe('SC-17 city boundaries', () => {
       }),
     ).toThrow(/route/i);
   });
+});
+
+// T16 extension — three-nations fixture validation edges throw before any engine exists, and
+// the default fixture (which runs its sellers to empty supply and its small cohorts to unmet
+// needs) keeps analytics projections finite (no NaN/Infinity anywhere).
+describe('SC-17 three-nations fixture validation edges', () => {
+  it('rejects invalid options without constructing engine state', () => {
+    expect(() =>
+      createThreeNationsFixture({
+        shock: {
+          kind: 'route-close',
+          routeId: 'plains-mountains-road',
+          durationTicks: 5,
+          startTick: 120,
+        },
+      }),
+    ).toThrow(RangeError);
+    expect(() =>
+      createThreeNationsFixture({
+        shock: { kind: 'route-close', routeId: 'no-such-route', durationTicks: 5, startTick: 121 },
+      }),
+    ).toThrow(/routeId/);
+    expect(() => createThreeNationsFixture({ kingdoms: [] })).toThrow(/kingdoms/);
+    expect(() => createThreeNationsFixture({ kingdoms: ['plains', 'plains'] })).toThrow(/kingdoms/);
+    expect(() => createThreeNationsFixture({ ticks: 1 })).toThrow(/ticks/);
+    expect(() => createThreeNationsFixture({ seed: -1 })).toThrow(/seed/);
+  });
+
+  it('keeps analytics projections finite while sellers run to empty supply and cohorts accumulate unmet', async () => {
+    // 30-tick fixture drive runs in a child over the BUILT entry (birpc starvation remedy,
+    // same as s0/m1); this process only walks the returned projection for finiteness.
+    const execFileAsync = promisify(execFile);
+    const script = `import { createThreeNations } from './packages/scenarios/dist/three-nations-trade-and-politics.js';
+import { projectWorld } from './packages/analytics/dist/index.js';
+const fixture = createThreeNations({ ticks: 30 });
+const commands = [];
+for (let tick = 1; tick <= 30; tick++) commands.push(...fixture.commandsForTick(tick));
+for (const command of commands) fixture.engine.submit(command);
+fixture.engine.run(30);
+const world = projectWorld(fixture.engine.getState().domain, 30);
+console.log(JSON.stringify(world));`;
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ['--input-type=module', '-e', script],
+      {
+        timeout: 1500000,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    const world: unknown = JSON.parse(stdout);
+    const walk = (value: unknown): void => {
+      if (typeof value === 'number') expect(Number.isFinite(value)).toBe(true);
+      else if (Array.isArray(value)) value.forEach(walk);
+      else if (value && typeof value === 'object') Object.values(value).forEach(walk);
+    };
+    walk(world);
+  }, 900000);
 });

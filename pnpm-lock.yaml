@@ -48,6 +48,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/simulation-core
 
+  packages/analytics:
+    dependencies:
+      '@epcse/simulation-core':
+        specifier: workspace:*
+        version: link:../simulation-core
+
   packages/scenarios:
     dependencies:
       '@epcse/simulation-core':

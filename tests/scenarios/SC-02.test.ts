@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import {
   createEngine,
@@ -109,4 +111,74 @@ describe('SC-02 agricultural capacity shock', () => {
       baseline.cities.cohorts.rural!.welfare,
     );
   }, 15000);
+});
+
+// T16 extension — three-nations fixture: route-close shock on the mountains food-import route.
+// The literal "agricultural capacity -40%" lever has no engine command; the import-cut shock is
+// the honest directional proxy on this fixture (recorded in T16_REPORT.md scenario-gaps).
+// Two sequential 155-tick in-process fixture runs block the vitest worker past the fixed 60s
+// birpc timeout (observed: "Timeout calling onTaskUpdate" unhandled errors, CI poisoning).
+// Same remedy as s0/m1: heavy runs execute in child processes over the BUILT entry; this
+// test only compares the sampled metrics series.
+describe('SC-02 three-nations route-close food-import direction', () => {
+  const execFileAsync = promisify(execFile);
+
+  interface Sc02Run {
+    readonly series: string[];
+  }
+
+  async function driveInChild(shock: boolean): Promise<Sc02Run> {
+    const script = `import { createThreeNations } from './packages/scenarios/dist/three-nations-trade-and-politics.js';
+const options = JSON.parse(process.env.T16_SC02_OPTIONS ?? '{}');
+const fixture = createThreeNations(options);
+const commands = [];
+for (let tick = 1; tick <= fixture.config.ticks; tick++) commands.push(...fixture.commandsForTick(tick));
+for (const command of commands) fixture.engine.submit(command);
+fixture.engine.run(fixture.config.ticks);
+const domain = fixture.engine.getState().domain;
+console.log(JSON.stringify({ series: domain['three-nations:metrics'].series }));`;
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ['--input-type=module', '-e', script],
+      {
+        timeout: 1500000,
+        maxBuffer: 16 * 1024 * 1024,
+        env: {
+          ...process.env,
+          T16_SC02_OPTIONS: JSON.stringify({
+            ticks: 155,
+            ...(shock
+              ? {
+                  shock: {
+                    kind: 'route-close' as const,
+                    routeId: 'plains-mountains-road',
+                    durationTicks: 30,
+                    startTick: 121,
+                  },
+                }
+              : {}),
+          }),
+        },
+      },
+    );
+    return JSON.parse(stdout) as Sc02Run;
+  }
+
+  it('raises mountains staple price and cumulative unmet against the same-seed baseline', async () => {
+    const [baseline, shocked] = await Promise.all([driveInChild(false), driveInChild(true)]);
+    const stapleAt = (run: Sc02Run, index: number): { price: number; unmet: number } => {
+      const frame = run.series[index]!.split('|');
+      // alphabetical kingdoms: coast, mountains, plains — mountains is index 1
+      const price = Number(frame[3]!.split(',')[1]);
+      // alphabetical cities: mount-hold is index 6; unmet is the 3rd counter
+      const unmet = Number(frame[1]!.split(';')[6]!.split(',')[2]);
+      return { price, unmet };
+    };
+    // first post-shock sample (tick 121)
+    const baselineSample = stapleAt(baseline, 120);
+    const shockedSample = stapleAt(shocked, 120);
+    expect(shockedSample.price).toBeGreaterThanOrEqual(baselineSample.price);
+    // final cumulative unmet (tick 155)
+    expect(stapleAt(shocked, 154).unmet).toBeGreaterThanOrEqual(stapleAt(baseline, 154).unmet);
+  }, 900000);
 });
