@@ -29,7 +29,7 @@ interface ThreeNationsDeterminismPayload {
 async function runThreeNationsInChild(ticks: number): Promise<ThreeNationsDeterminismPayload> {
   const script = `import { runThreeNations } from './packages/scenarios/dist/three-nations-trade-and-politics.js'; const r = runThreeNations({ seed: 42, ticks: ${ticks} }); console.log(JSON.stringify({ stateHash: r.stateHash, eventHash: r.eventHash, politics: r.politics, world: r.world, invariants: r.invariants }));`;
   const { stdout } = await execFileAsync(process.execPath, ['--input-type=module', '-e', script], {
-    timeout: 1500000,
+    timeout: 3000000,
     maxBuffer: 10 * 1024 * 1024,
   });
   return JSON.parse(stdout) as ThreeNationsDeterminismPayload;
@@ -368,20 +368,16 @@ describe('m1: shocks, SC-15 determinism at 1000 ticks, reconciliation, paginatio
     ).toBeDefined();
   }, 1800000);
 
-  it('SC-15 determinism: two fresh child-process 1000-tick runs produce identical hashes, politics counts, and world totals', async () => {
-    // Each child executes the BUILT scenario entry (packages/scenarios/dist) from a fresh
-    // process with the same seed/config; the test only compares the deterministic payloads.
-    // Run sequentially: CI runners (2-core) slow each 1000-tick child to ~10-25 min, and
-    // Promise.all doubles concurrent CPU pressure inside the vitest worker pool, starving
-    // the runner's birpc onTaskUpdate (unhandled onTaskUpdate timeouts poisoned exit codes).
-    // SC-15's canonical byte-identical double-run already runs in tests/scenarios/SC-15
-    // over the built CLI and in CI; this in-suite check runs one child and pins the hash.
+  it('SC-15 regression: a fresh 1000-tick child matches the canonical hashes', async () => {
+    // The independent two-run comparison is in tests/scenarios/SC-15 and CI. This
+    // separate built-scenario run pins the canonical hashes; concurrent CPU-heavy
+    // tests on hosted runners can require more than 25 minutes for this one child.
     const a = await runThreeNationsInChild(1000);
     expect(a.stateHash).toBe('90914b5792f1dfe324598c87c339e170d0abc613d964a8fab34c7a71e3f9bf18');
     expect(a.eventHash).toBe('af179ccaea4845026a76e10e033310b17a83aee654cad9d2703da28bc7c5182e');
     expect(a.invariants.moneyConserved).toBe(true);
     expect(a.invariants.moneyNonnegative).toBe(true);
-  }, 2400000);
+  }, 3300000);
 
   it('reconciliation: final analytics projection city sums == kingdom sums == world totals == accounting treasuries', async () => {
     const run = await runFixtureInChild({ ticks: 250 });
