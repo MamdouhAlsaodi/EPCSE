@@ -3,6 +3,7 @@
 // resumes after expiry.
 import { describe, expect, it } from 'vitest';
 import { createThreeNations } from '../../packages/scenarios/src/three-nations-trade-and-politics.js';
+import { advanceResponsively } from './advance-responsively.js';
 
 interface Shipment {
   routeId: string;
@@ -11,7 +12,7 @@ interface Shipment {
   status: string;
 }
 
-function drive(
+async function drive(
   ticks: number,
   variant?: NonNullable<Parameters<typeof createThreeNations>[0]>['variant'],
 ) {
@@ -19,7 +20,7 @@ function drive(
   const commands = [];
   for (let tick = 1; tick <= ticks; tick++) commands.push(...fixture.commandsForTick(tick));
   for (const command of commands) fixture.engine.submit(command);
-  fixture.engine.run(ticks);
+  await advanceResponsively(fixture.engine, ticks);
   return fixture;
 }
 
@@ -29,9 +30,9 @@ const clothesOf = (domain: Record<string, unknown>) =>
   );
 
 describe('SC-10 importer trade-restriction on clothes via coast-plain-road', () => {
-  it('blocks restricted shipments during the policy and lets other trade continue', () => {
-    const restricted = drive(260, { tradeRestriction: true }).engine.getState().domain;
-    const baseline = drive(260).engine.getState().domain;
+  it('blocks restricted shipments during the policy and lets other trade continue', async () => {
+    const restricted = (await drive(260, { tradeRestriction: true })).engine.getState().domain;
+    const baseline = (await drive(260)).engine.getState().domain;
 
     const restrictedClothes = clothesOf(restricted);
     // pre-policy departure (tick 103) and post-expiry resumption (tick 203/205) exist

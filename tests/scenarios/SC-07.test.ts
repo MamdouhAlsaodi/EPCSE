@@ -35,8 +35,20 @@ describe('SC-07 food-subsidy policy on the fixture', () => {
     const openingTreasury = accounting.openingBalances.find(
       (e) => e.accountId === 'plains-treasury',
     )!.balance;
-    const treasuryPaid = openingTreasury - treasury!.balance;
-    expect(treasuryPaid).toBe(totalRefund);
+    const serviceEntries = accounting.journal.filter(
+      (entry) => entry.causeId === 'city-service:plain-central',
+    );
+    expect(serviceEntries).toHaveLength(20);
+    for (const entry of serviceEntries) {
+      expect(entry.effects).toContainEqual({
+        debit: 'plain-central-residents-cash',
+        credit: 'plains-treasury',
+        amount: 1,
+        stockDeltas: [],
+      });
+    }
+    const serviceRevenue = serviceEntries.length;
+    expect(openingTreasury - treasury!.balance).toBe(totalRefund - serviceRevenue);
     expect(recipient!.balance).toBeGreaterThan(0);
     const opening = accounting.openingBalances.reduce((sum, e) => sum + e.balance, 0);
     expect(accounting.accounts.reduce((sum, e) => sum + e.balance, 0)).toBe(opening);

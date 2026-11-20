@@ -37,7 +37,19 @@ describe('SC-08 local-purchase-tax on plain-central', () => {
     const openingTreasury = taxedAccounting.openingBalances.find(
       (e) => e.accountId === 'plains-treasury',
     )!.balance;
-    expect(treasury.balance - openingTreasury).toBe(taxTotal);
+    const serviceEntries = taxedAccounting.journal.filter(
+      (entry) => entry.causeId === 'city-service:plain-central',
+    );
+    expect(serviceEntries).toHaveLength(20);
+    for (const entry of serviceEntries) {
+      expect(entry.effects).toContainEqual({
+        debit: 'plain-central-residents-cash',
+        credit: 'plains-treasury',
+        amount: 1,
+        stockDeltas: [],
+      });
+    }
+    expect(treasury.balance - openingTreasury).toBe(taxTotal + serviceEntries.length);
 
     const taxedPurchases = taxedAccounting.journal.filter(
       (entry) =>

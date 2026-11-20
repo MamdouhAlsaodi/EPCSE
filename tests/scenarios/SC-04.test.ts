@@ -2,6 +2,7 @@
 // route (resume after reopen) while the alternative plains↔mountains route keeps carrying.
 import { describe, expect, it } from 'vitest';
 import { createThreeNations } from '../../packages/scenarios/src/three-nations-trade-and-politics.js';
+import { advanceResponsively } from './advance-responsively.js';
 
 interface Shipment {
   routeId: string;
@@ -12,7 +13,7 @@ interface Shipment {
 }
 
 describe('SC-04 route-close shock with in-transit pause and alternative route', () => {
-  it('pauses the in-transit food shipment during closure and lets the alternative route carry', () => {
+  it('pauses the in-transit food shipment during closure and lets the alternative route carry', async () => {
     const fixture = createThreeNations({
       ticks: 150,
       shock: {
@@ -25,7 +26,7 @@ describe('SC-04 route-close shock with in-transit pause and alternative route', 
     const schedule = [];
     for (let tick = 1; tick <= 150; tick++) schedule.push(...fixture.commandsForTick(tick));
     for (const command of schedule) fixture.engine.submit(command);
-    fixture.engine.run(121);
+    await advanceResponsively(fixture.engine, 121);
     const atClosure = fixture.engine.getState().domain;
     const main = (atClosure.logistics as { shipments: Shipment[] }).shipments.filter(
       (s) => s.routeId === 'plains-mountains-road',
@@ -41,7 +42,7 @@ describe('SC-04 route-close shock with in-transit pause and alternative route', 
       true,
     );
 
-    fixture.engine.run(19); // through the closure window (121..140), still closed at 140
+    await advanceResponsively(fixture.engine, 19); // through the closure window (121..140), still closed at 140
     const inClosure = fixture.engine.getState().domain;
     const closedRoutes = (inClosure.logistics as { closedRouteIds: string[] }).closedRouteIds;
     expect(closedRoutes).toContain('plains-mountains-road');

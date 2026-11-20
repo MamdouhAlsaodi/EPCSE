@@ -155,7 +155,7 @@ export function projectSeries(metrics: unknown): SeriesFrame[] {
 }
 
 /**
- * Projects the latest metrics sample into a reconciled world view.
+ * Projects the requested metrics sample into a reconciled world view.
  * Reconciliation rule: city sums == kingdom sums == world totals (exact integer arithmetic,
  * computed from the same source frames so the identity holds by construction).
  */
@@ -167,7 +167,8 @@ export function projectWorld(
   const { frames, kingdomIds } = readFrames(domain);
   if (!frames.length) throw new RangeError('metrics series is empty');
   const framesOut = projectSeries(domain);
-  const frame = framesOut[framesOut.length - 1]!;
+  const frame = framesOut.find((sample) => sample.tick === tick);
+  if (!frame) throw new RangeError(`metrics sample not found for tick ${tick}`);
 
   const kingdomOf = (cityId: string): string | undefined => {
     const logistics = domain.logistics as

@@ -166,6 +166,35 @@ describe('M1 integration: three-nations-trade-and-politics fixture', () => {
     expect(report.config.kingdomGovernmentForms).not.toHaveProperty('coast');
   }, 600000);
 
+  it('funds demanded city services through the shared accounting journal and applies coverage', () => {
+    const fixture = createThreeNations();
+    fixture.engine.run(1);
+    const domain = fixture.engine.getState().domain;
+    const cities = domain.cities as {
+      cohorts: Record<string, { serviceCoverage: Record<string, number> }>;
+    };
+    expect(cities.cohorts['plain-central-residents']?.serviceCoverage.care).toBe(50);
+
+    const accounting = domain.accounting as AccountingState;
+    const serviceEntries = accounting.journal.filter(
+      (entry) => entry.causeId === 'city-service:plain-central',
+    );
+    expect(serviceEntries).toHaveLength(1);
+    expect(serviceEntries[0]?.type).toBe('payment');
+    expect(serviceEntries[0]?.effects).toContainEqual({
+      debit: 'plain-central-residents-cash',
+      credit: 'plains-treasury',
+      amount: 1,
+      stockDeltas: [],
+    });
+    expect(
+      accounting.accounts.find((account) => account.id === 'plain-central-residents-cash')?.balance,
+    ).toBeLessThan(200);
+    expect(
+      accounting.accounts.find((account) => account.id === 'plains-treasury')?.balance,
+    ).toBeGreaterThan(5000);
+  });
+
   it('runs 60 ticks with every phase system firing, real conversion/departure/arrival/settlement, conservation, and reconciled analytics', async () => {
     const run = await runFixtureInChild({ ticks: 60 });
     const domain = run.domain;
@@ -348,7 +377,7 @@ describe('m1: shocks, SC-15 determinism at 1000 ticks, reconciliation, paginatio
     // SC-15's canonical byte-identical double-run already runs in tests/scenarios/SC-15
     // over the built CLI and in CI; this in-suite check runs one child and pins the hash.
     const a = await runThreeNationsInChild(1000);
-    expect(a.stateHash).toBe('88605e5efa3262424f6ba5c0a2fef2006c80353bd7a897f6d760189851a94e78');
+    expect(a.stateHash).toBe('90914b5792f1dfe324598c87c339e170d0abc613d964a8fab34c7a71e3f9bf18');
     expect(a.eventHash).toBe('af179ccaea4845026a76e10e033310b17a83aee654cad9d2703da28bc7c5182e');
     expect(a.invariants.moneyConserved).toBe(true);
     expect(a.invariants.moneyNonnegative).toBe(true);

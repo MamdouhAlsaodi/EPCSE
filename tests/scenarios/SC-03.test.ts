@@ -3,8 +3,9 @@
 import { describe, expect, it } from 'vitest';
 import { createThreeNations } from '../../packages/scenarios/src/three-nations-trade-and-politics.js';
 import type { AccountingState } from '@epcse/simulation-core';
+import { advanceResponsively } from './advance-responsively.js';
 
-function drive(
+async function drive(
   ticks: number,
   variant?: NonNullable<Parameters<typeof createThreeNations>[0]>['variant'],
 ) {
@@ -12,7 +13,7 @@ function drive(
   const commands = [];
   for (let tick = 1; tick <= ticks; tick++) commands.push(...fixture.commandsForTick(tick));
   for (const command of commands) fixture.engine.submit(command);
-  fixture.engine.run(ticks);
+  await advanceResponsively(fixture.engine, ticks);
   return fixture;
 }
 
@@ -26,8 +27,8 @@ const routeShipments = (domain: Record<string, unknown>, routeId: string): Shipm
   );
 
 describe('SC-03 viable accepted trade route vs refused control', () => {
-  it('moves a shipment with paid freight when plains accepts, and ships nothing when it refuses', () => {
-    const accepted = drive(40).engine.getState().domain;
+  it('moves a shipment with paid freight when plains accepts, and ships nothing when it refuses', async () => {
+    const accepted = (await drive(40)).engine.getState().domain;
     const shipments = routeShipments(accepted, 'plains-mountains-road');
     expect(shipments.length).toBeGreaterThanOrEqual(1);
     expect(shipments.some((s) => s.status === 'arrived')).toBe(true);
@@ -42,7 +43,7 @@ describe('SC-03 viable accepted trade route vs refused control', () => {
     expect(effect.credit).toBe('carrier-cash');
     expect(effect.amount).toBe(3);
 
-    const refused = drive(40, { playerDecision: 'refuse' }).engine.getState().domain;
+    const refused = (await drive(40, { playerDecision: 'refuse' })).engine.getState().domain;
     expect(routeShipments(refused, 'plains-mountains-road')).toHaveLength(0);
     const refusedAccounting = refused.accounting as AccountingState;
     expect(

@@ -22,6 +22,14 @@ function smallDomain() {
   } as Readonly<Record<string, unknown>>;
 }
 describe('analytics projections', () => {
+  it('projects the requested historical sample and rejects a missing tick', () => {
+    const historical = projectWorld(smallDomain(), 1);
+    expect(historical.tick).toBe(1);
+    expect(historical.cities.alpha?.produced).toBe(4);
+    expect(historical.kingdoms.north?.treasury).toBe(900);
+    expect(() => projectWorld(smallDomain(), 3)).toThrow(RangeError);
+  });
+
   it('projects the world from the latest fixture metrics sample with exact reconciliation', () => {
     const world = projectWorld(smallDomain(), 2);
     expect(world.tick).toBe(2);

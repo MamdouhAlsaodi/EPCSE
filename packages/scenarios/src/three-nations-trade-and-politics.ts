@@ -474,7 +474,7 @@ const cohortDef = (
   skills,
   needs,
   incomePerPerson: 0,
-  serviceNeeds: {},
+  serviceNeeds: cityId === 'plain-central' && suffix === 'residents' ? { care: 1 } : {},
   welfare: 50,
   openingBudget,
 });
@@ -814,8 +814,14 @@ export function createThreeNations(options: ThreeNationsOptions = {}): ThreeNati
   const citiesConfig: CityConfig = {
     cities: cityIds.map((cityId) => ({
       id: cityId,
-      serviceCapacity: { care: 500 },
-      serviceProvisionCost: 0,
+      serviceCapacity: { care: cityId === 'plain-central' ? 5 : 500 },
+      serviceProvisionCost: cityId === 'plain-central' ? 1 : 0,
+      ...(cityId === 'plain-central'
+        ? {
+            serviceAccountId: 'plain-central-residents-cash',
+            serviceProviderAccountId: 'plains-treasury',
+          }
+        : {}),
     })),
     cohorts: specs.map((s) => ({
       id: s.cohort.id,

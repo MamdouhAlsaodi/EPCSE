@@ -4,8 +4,9 @@
 import { describe, expect, it } from 'vitest';
 import { createThreeNations } from '../../packages/scenarios/src/three-nations-trade-and-politics.js';
 import type { AccountingState } from '@epcse/simulation-core';
+import { advanceResponsively } from './advance-responsively.js';
 
-function drive(
+async function drive(
   ticks: number,
   variant?: NonNullable<Parameters<typeof createThreeNations>[0]>['variant'],
 ) {
@@ -13,7 +14,7 @@ function drive(
   const commands = [];
   for (let tick = 1; tick <= ticks; tick++) commands.push(...fixture.commandsForTick(tick));
   for (const command of commands) fixture.engine.submit(command);
-  fixture.engine.run(ticks);
+  await advanceResponsively(fixture.engine, ticks);
   return fixture;
 }
 
@@ -24,9 +25,9 @@ const tariffFor = (accounting: AccountingState, policyId: string, commodity: str
     .map((entry) => (entry.effects[0] as { amount?: number }).amount ?? 0);
 
 describe('SC-09 tariff-discount offer on the covered pair', () => {
-  it('lowers the covered tariff and leaves the non-covered commodity untouched', () => {
-    const discounted = drive(260, { tariffDiscount: true }).engine.getState().domain;
-    const baseline = drive(260, { tariffOnly: true }).engine.getState().domain;
+  it('lowers the covered tariff and leaves the non-covered commodity untouched', async () => {
+    const discounted = (await drive(260, { tariffDiscount: true })).engine.getState().domain;
+    const baseline = (await drive(260, { tariffOnly: true })).engine.getState().domain;
     const discountedAmounts = tariffFor(
       discounted.accounting as AccountingState,
       'clothes-import-tariff',
