@@ -1,3 +1,5 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import {
   createAccountingState,
@@ -232,4 +234,61 @@ describe('SC-06 social settlement', () => {
     ).toMatchObject({ status: 'failed', reason: 'settlement could not be funded' });
     expect(engine.getState().domain.accounting).toEqual(beforeAccounting);
   });
+});
+
+// T16 extension — three-nations fixture: a politics.negotiate offer funded by the employer
+// account resolves with a social-settlement journal entry and capacity recovers over
+// recoveryTicks; the underfunded employer variant fails instead.
+// 40-tick fixture drives block the vitest worker past the fixed 60s birpc timeout under
+// suite load, so each run executes in a child process over the BUILT entry (s0/m1 remedy);
+// this file only asserts on the returned samples.
+describe('SC-06 three-nations funded negotiation', () => {
+  const execFileAsync = promisify(execFile);
+
+  interface Sc06Run {
+    readonly finalStatus: string | null;
+    readonly settlementCount: number;
+    readonly capacitySamples: number[];
+  }
+
+  async function driveNegotiationInChild(mode: 'funded' | 'underfunded'): Promise<Sc06Run> {
+    const script = `import { createThreeNations } from './packages/scenarios/dist/three-nations-trade-and-politics.js';
+import { getPoliticsImpactPlan } from './packages/simulation-core/dist/index.js';
+const fixture = createThreeNations({ ticks: 40, variant: { minerNegotiation: ${JSON.stringify(mode)} } });
+const capacitySamples = [];
+for (let tick = 1; tick <= 40; tick++) {
+  for (const command of fixture.commandsForTick(tick)) fixture.engine.submit(command);
+  fixture.engine.step();
+  capacitySamples.push(getPoliticsImpactPlan(fixture.engine.getState().domain, 'mountain-mine')?.capacityBps ?? 10000);
+}
+const domain = fixture.engine.getState().domain;
+const action = (domain.politics?.actions ?? []).find((a) => a.groupId === 'mountain-miners');
+const settlementCount = domain.accounting.journal.filter((e) => e.causeId.startsWith('social-settlement:social-mountain-miners')).length;
+console.log(JSON.stringify({ finalStatus: action?.status ?? null, settlementCount, capacitySamples }));`;
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      ['--input-type=module', '-e', script],
+      {
+        timeout: 1500000,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    return JSON.parse(stdout) as Sc06Run;
+  }
+
+  it('resolves a funded offer with a settlement journal and recovering capacity', async () => {
+    const run = await driveNegotiationInChild('funded');
+    expect(run.finalStatus).toBe('resolved');
+    expect(run.settlementCount).toBeGreaterThan(0);
+    // capacity recovery: impact-plan capacity rises within the recovery window
+    const maxCapacity = Math.max(...run.capacitySamples);
+    expect(maxCapacity).toBeGreaterThan(run.capacitySamples.find((c) => c < 10000) ?? 10000);
+    expect(maxCapacity).toBe(10000);
+  }, 900000);
+
+  it('fails the underfunded offer without settlement journal', async () => {
+    const run = await driveNegotiationInChild('underfunded');
+    expect(run.finalStatus).toBe('failed');
+    expect(run.settlementCount).toBe(0);
+  }, 900000);
 });

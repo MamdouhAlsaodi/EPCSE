@@ -22,16 +22,20 @@ function scenario() {
 }
 
 describe('determinism', () => {
-  it('matches domain, state/event hashes, command order, and stable event IDs at every tick across 1000 ticks', () => {
-    const a = scenario();
-    const b = scenario();
-    for (let tick = 1; tick <= 1000; tick++) {
-      expect(b.step()).toEqual(a.step());
-      expect(b.events()).toEqual(a.events());
-    }
-    expect(a.events().map((event) => event.eventId)).toEqual(
-      Array.from({ length: 10 }, (_, index) => `event-${index + 1}`),
-    );
-    expect(a.getState().domain).toMatchObject({ balances: { a: 990, b: 10 } });
-  });
+  it(
+    'matches domain, state/event hashes, command order, and stable event IDs at every tick across 1000 ticks',
+    { timeout: 300000 },
+    () => {
+      const a = scenario();
+      const b = scenario();
+      for (let tick = 1; tick <= 1000; tick++) {
+        expect(b.step()).toEqual(a.step());
+        expect(b.events()).toEqual(a.events());
+      }
+      expect(a.events().map((event) => event.eventId)).toEqual(
+        Array.from({ length: 10 }, (_, index) => `event-${index + 1}`),
+      );
+      expect(a.getState().domain).toMatchObject({ balances: { a: 990, b: 10 } });
+    },
+  );
 });

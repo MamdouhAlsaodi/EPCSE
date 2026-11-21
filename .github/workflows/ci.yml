@@ -63,3 +63,21 @@ jobs:
           console.log(result.stdout);
           NODE
       - run: node --input-type=module -e "import { createWorld } from '@epcse/simulation-core'; if (createWorld('ci').run(2).tick !== 2) process.exit(1)"
+      - name: Built three-nations M1 CLI 1000-tick smoke
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { spawnSync } from 'node:child_process';
+          const args = ['apps/cli/dist/main.js', 'run', '--scenario', 'three-nations-trade-and-politics', '--seed', '42', '--ticks', '1000'];
+          const first = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 1800000 });
+          const second = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 1800000 });
+          assert.equal(first.status, 0, first.error?.message ?? first.stderr);
+          assert.equal(second.status, 0, second.error?.message ?? second.stderr);
+          assert.equal(first.stdout, second.stdout, 'repeated built three-nations CLI output differs');
+          assert.match(first.stdout, /fixture v1/);
+          assert.match(first.stdout, /kingdoms 3; cities 12; goods 15; sectors 6; classes 5/);
+          assert.match(first.stdout, /Reconciliation: .*: true/);
+          assert.match(first.stdout, /money conserved true/);
+          assert.match(first.stdout, /State hash: [a-f0-9]{64}/);
+          console.log(first.stdout);
+          NODE

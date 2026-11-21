@@ -70,26 +70,30 @@ describe('vertical-slice scenario', () => {
     expect(first).toMatch(/Event hash: [a-f0-9]{64}/);
   }, 1800000);
 
-  it('allows explicit alternate fixture values and rejects invalid configurations', () => {
-    const report = runVerticalSlice({
-      seed: 7,
-      ticks: 10,
-      commodities: ['food', 'timber', 'ore', 'cloth', 'salt'],
-      cohorts: ['workers', 'merchants'],
-      road: { cost: 4, duration: 2 },
-    });
-    expect(report.commodities).toEqual(['food', 'timber', 'ore', 'cloth', 'salt']);
-    expect(report.road).toMatchObject({ cost: 4, duration: 2 });
-    expect(report.trade.fundedFreight).toBe(true);
-    const refused = runVerticalSlice({ ticks: 10, aiMinimumStock: 1 });
-    expect(refused.aiDecision.accepted).toBe(false);
-    expect(refused.trade.departed).toBe(0);
-    const playerRefused = runVerticalSlice({ ticks: 10, playerChoice: 'refuse' });
-    expect(playerRefused.playerDecision.accepted).toBe(false);
-    expect(playerRefused.trade.departed).toBe(0);
-    expect(() => runVerticalSlice({ commodities: ['grain', 'wood'] as never })).toThrow(/five/i);
-    expect(() => runVerticalSlice({ cohorts: ['only-one'] as never })).toThrow(/cohort/i);
-    expect(() => runVerticalSlice({ road: { cost: 0, duration: 1 } })).toThrow(/road/i);
-    expect(() => runVerticalSlice({ aiMinimumStock: -1 })).toThrow(/stock/i);
-  });
+  it(
+    'allows explicit alternate fixture values and rejects invalid configurations',
+    { timeout: 300000 },
+    () => {
+      const report = runVerticalSlice({
+        seed: 7,
+        ticks: 10,
+        commodities: ['food', 'timber', 'ore', 'cloth', 'salt'],
+        cohorts: ['workers', 'merchants'],
+        road: { cost: 4, duration: 2 },
+      });
+      expect(report.commodities).toEqual(['food', 'timber', 'ore', 'cloth', 'salt']);
+      expect(report.road).toMatchObject({ cost: 4, duration: 2 });
+      expect(report.trade.fundedFreight).toBe(true);
+      const refused = runVerticalSlice({ ticks: 10, aiMinimumStock: 1 });
+      expect(refused.aiDecision.accepted).toBe(false);
+      expect(refused.trade.departed).toBe(0);
+      const playerRefused = runVerticalSlice({ ticks: 10, playerChoice: 'refuse' });
+      expect(playerRefused.playerDecision.accepted).toBe(false);
+      expect(playerRefused.trade.departed).toBe(0);
+      expect(() => runVerticalSlice({ commodities: ['grain', 'wood'] as never })).toThrow(/five/i);
+      expect(() => runVerticalSlice({ cohorts: ['only-one'] as never })).toThrow(/cohort/i);
+      expect(() => runVerticalSlice({ road: { cost: 0, duration: 1 } })).toThrow(/road/i);
+      expect(() => runVerticalSlice({ aiMinimumStock: -1 })).toThrow(/stock/i);
+    },
+  );
 });

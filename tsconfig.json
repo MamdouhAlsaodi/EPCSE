@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/simulation-core" },
+    { "path": "packages/analytics" },
     { "path": "packages/scenarios" },
     { "path": "apps/cli" }
   ]
