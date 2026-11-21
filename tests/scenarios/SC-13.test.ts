@@ -36,5 +36,8 @@ describe('SC-13 firm insolvency via the engine liquidity rule', () => {
     const accounting = domain.accounting as AccountingState;
     expect(accounting.accounts.every((a) => a.balance >= 0)).toBe(true);
     expect(accounting.stock.every((s) => s.quantity >= 0)).toBe(true);
+    // NOTE: the fixture's alchemist exists only under the insolventProducer lever (openingCash 1),
+    // so no funded same-firm control run is constructible without tuning the fixture; the healthy
+    // mountain-mine firm in the same run is the honest control (asserted above).
   }, 900000);
 });

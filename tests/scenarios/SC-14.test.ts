@@ -44,5 +44,12 @@ describe('SC-14 reserve floor under committed spending', () => {
     expect(
       floorDecisions.some((d) => d.reason.includes('insufficient') || d.reason.includes('reserve')),
     ).toBe(true);
+    // Control pairing (spec-stated): the same run WITHOUT the reserve-floor lever never records a
+    // refused/reduced funding decision for mountains — the floor policy is the only difference.
+    const control = drive(30).engine.getState().domain;
+    const controlDecisions = (
+      control.government as { decisions: Array<{ kingdomId: string; selected: string }> }
+    ).decisions.filter((d) => d.kingdomId === 'mountains' && d.selected !== 'fund');
+    expect(controlDecisions).toHaveLength(0);
   }, 900000);
 });

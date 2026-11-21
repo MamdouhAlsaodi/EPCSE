@@ -55,5 +55,25 @@ describe('SC-07 food-subsidy policy on the fixture', () => {
 
     const baseline = drive(20).engine.getState().domain;
     expect(refundEntries(baseline.accounting as AccountingState)).toHaveLength(0);
+    // Directional (spec-stated): the subsidy cost reaches the intended recipient as real credits,
+    // coverage (recipient settled purchases) is at least baseline over the same window, and the
+    // treasury never goes negative while funding the refunds.
+    for (const entry of refunds) {
+      const effect = entry.effects[0] as { credit?: string; amount?: number };
+      expect(effect.credit).toBe('plain-central-residents-cash');
+      expect(effect.amount).toBeGreaterThan(0);
+    }
+    const recipientPurchases = (accounting: AccountingState) =>
+      accounting.journal
+        .filter(
+          (entry) =>
+            entry.type === 'payment' &&
+            entry.causeId.startsWith('purchase:plain-central-residents'),
+        )
+        .reduce((sum, entry) => sum + entryAmount(entry), 0);
+    expect(recipientPurchases(accounting)).toBeGreaterThanOrEqual(
+      recipientPurchases(baseline.accounting as AccountingState),
+    );
+    expect(treasury!.balance).toBeGreaterThanOrEqual(0);
   }, 900000);
 });
