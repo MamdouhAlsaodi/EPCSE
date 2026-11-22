@@ -29,6 +29,19 @@ describe('SC-08 local-purchase-tax on plain-central', () => {
       entry.causeId.startsWith(TAX_PREFIX),
     );
     expect(taxEntries.length).toBeGreaterThan(0);
+    // Directional (spec-stated): the baseline run collects no tax revenue at all; raising the
+    // tax strictly increases treasury revenue from the taxed flow via real journal entries.
+    const baselineTaxEntries = baselineAccounting.journal.filter((entry) =>
+      entry.causeId.startsWith(TAX_PREFIX),
+    );
+    expect(baselineTaxEntries).toHaveLength(0);
+    const taxedTreasuryDelta =
+      taxedAccounting.accounts.find((a) => a.id === 'plains-treasury')!.balance -
+      taxedAccounting.openingBalances.find((e) => e.accountId === 'plains-treasury')!.balance;
+    const baselineTreasuryDelta =
+      baselineAccounting.accounts.find((a) => a.id === 'plains-treasury')!.balance -
+      baselineAccounting.openingBalances.find((e) => e.accountId === 'plains-treasury')!.balance;
+    expect(taxedTreasuryDelta).toBeGreaterThan(baselineTreasuryDelta);
     const taxTotal = taxEntries.reduce(
       (sum, entry) => sum + ((entry.effects[0] as { amount?: number }).amount ?? 0),
       0,

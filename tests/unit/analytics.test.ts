@@ -21,6 +21,87 @@ function smallDomain() {
     },
   } as Readonly<Record<string, unknown>>;
 }
+// Version 2 domain: same frame body plus a 5th '|'-separated segment with sparse city price
+// samples ("cityId:commodity:price" entries joined by ';', alphabetical city/commodity order).
+function v2Domain() {
+  return {
+    'three-nations:metrics': {
+      version: 2,
+      series: [
+        '1|4,2,1,1,0;2,3,0,0,1|900,500|3,7|alpha:grain:3;alpha:wood:5;beta:grain:2',
+        '2|8,4,1,2,1;4,6,0,0,2|880,480|4,7|',
+      ],
+    },
+    logistics: {
+      cityKingdomIds: { alpha: 'north', beta: 'south' },
+    },
+  } as Readonly<Record<string, unknown>>;
+}
+
+describe('analytics projections (metrics v2 city price samples)', () => {
+  it('parses the v2 samples segment into real per-city prices maps and empty maps when absent', () => {
+    const frames = projectSeries(v2Domain());
+    expect(frames).toHaveLength(2);
+    expect(frames[0]?.cities.alpha?.prices).toEqual({ grain: 3, wood: 5 });
+    expect(frames[0]?.cities.beta?.prices).toEqual({ grain: 2 });
+    // tick 2 observed no quotes this tick: sparse-and-honest, empty map
+    expect(frames[1]?.cities.alpha?.prices).toEqual({});
+    expect(frames[1]?.cities.beta?.prices).toEqual({});
+    // counters and kingdom data unchanged from v1 semantics
+    expect(frames[0]?.cities.alpha?.produced).toBe(4);
+    expect(frames[0]?.staples.north).toEqual({ grain: 3 });
+  });
+
+  it('projects a v2 sample through projectWorld with prices and the full reconciliation identity', () => {
+    const world = projectWorld(v2Domain(), 1);
+    expect(world.cities.alpha?.prices).toEqual({ grain: 3, wood: 5 });
+    const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+    for (const field of ['produced', 'consumed', 'unmet', 'departed', 'arrived'] as const) {
+      expect(sum(Object.values(world.cities).map((c) => c[field]))).toBe(world.world[field]);
+      expect(sum(Object.values(world.kingdoms).map((k) => k[field]))).toBe(world.world[field]);
+    }
+  });
+
+  it('rejects malformed v2 samples segments (unknown city, bad order, bad price, missing segment)', () => {
+    const base = {
+      logistics: { cityKingdomIds: { alpha: 'north', beta: 'south' } },
+    };
+    const domainWith = (samples: string, version = 2) => ({
+      ...base,
+      'three-nations:metrics': {
+        version,
+        series: [`1|4,2,1,1,0;2,3,0,0,1|900,500|3,7|${samples}`],
+      },
+    });
+    expect(() => projectSeries(domainWith('alpha:grain:3;ghost:grain:2'))).toThrow(RangeError);
+    expect(() => projectSeries(domainWith('beta:grain:2;alpha:grain:3'))).toThrow(RangeError);
+    expect(() => projectSeries(domainWith('alpha:wood:5;alpha:grain:3'))).toThrow(RangeError);
+    expect(() => projectSeries(domainWith('alpha:grain:-1'))).toThrow(RangeError);
+    expect(() => projectSeries(domainWith('alpha:grain:oops'))).toThrow(RangeError);
+    expect(() => projectSeries(domainWith('alpha:grain'))).toThrow(RangeError);
+    // a v2 frame without the samples segment at all is malformed for v2
+    const missingSegment = {
+      ...base,
+      'three-nations:metrics': {
+        version: 2,
+        series: ['1|4,2,1,1,0;2,3,0,0,1|900,500|3,7'],
+      },
+    };
+    expect(() => projectSeries(missingSegment)).toThrow(RangeError);
+  });
+
+  it('still projects version 1 snapshots (no samples segment) with empty prices maps', () => {
+    const frames = projectSeries(smallDomain());
+    expect(frames).toHaveLength(2);
+    for (const frame of frames) {
+      for (const city of Object.values(frame.cities)) expect(city.prices).toEqual({});
+    }
+    const world = projectWorld(smallDomain(), 2);
+    expect(world.cities.alpha?.prices).toEqual({});
+    expect(world.world.produced).toBe(12);
+  });
+});
+
 describe('analytics projections', () => {
   it('projects the requested historical sample and rejects a missing tick', () => {
     const historical = projectWorld(smallDomain(), 1);
@@ -123,6 +204,53 @@ const journal: AccountingJournalEntry[] = [
     rationale: 'departure',
   },
 ];
+
+describe('analytics projection filters', () => {
+  it('rejects unknown city or kingdom ids with RangeError', () => {
+    expect(() => projectSeries(smallDomain(), { cityIds: ['alpha', 'ghost'] })).toThrow(RangeError);
+    expect(() => projectWorld(smallDomain(), 1, { kingdomIds: ['north', 'east'] })).toThrow(
+      RangeError,
+    );
+    expect(() => projectSeries(smallDomain(), { tickFrom: 5, tickTo: 1 })).toThrow(RangeError);
+  });
+
+  it('filters the series by tick window preserving order', () => {
+    const frames = projectSeries(smallDomain(), { tickFrom: 2, tickTo: 2 });
+    expect(frames.map((f) => f.tick)).toEqual([2]);
+    expect(projectSeries(smallDomain(), { tickFrom: 1 }).map((f) => f.tick)).toEqual([1, 2]);
+  });
+
+  it('restricts cities and kingdoms to the filter with internally consistent filtered totals', () => {
+    // kingdom filter includes its cities
+    const north = projectWorld(smallDomain(), 2, { kingdomIds: ['north'] });
+    expect(Object.keys(north.cities).sort()).toEqual(['alpha']);
+    expect(Object.keys(north.kingdoms)).toEqual(['north']);
+    expect(north.world.produced).toBe(8);
+    expect(north.world.treasury).toBe(880);
+    // filtered totals equal the sum of their OWN rows, not world totals
+    const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+    expect(sum(Object.values(north.cities).map((c) => c.produced))).toBe(north.world.produced);
+    expect(north.world.produced).not.toBe(12);
+    // city filter implies only owning kingdoms of included cities appear
+    const beta = projectWorld(smallDomain(), 2, { cityIds: ['beta'] });
+    expect(Object.keys(beta.cities)).toEqual(['beta']);
+    expect(Object.keys(beta.kingdoms)).toEqual(['south']);
+    expect(beta.world.consumed).toBe(6);
+    expect(beta.world.treasury).toBe(480);
+  });
+
+  it('leaves the full view unchanged when no filter is given', () => {
+    const unfiltered = projectWorld(smallDomain(), 2);
+    expect(unfiltered.world.produced).toBe(12);
+    expect(Object.keys(unfiltered.cities).sort()).toEqual(['alpha', 'beta']);
+    expect(projectSeries(smallDomain())).toHaveLength(2);
+  });
+
+  it('rejects a projectWorld tick outside an explicit tick window', () => {
+    expect(() => projectWorld(smallDomain(), 1, { tickFrom: 2 })).toThrow(RangeError);
+    expect(() => projectWorld(smallDomain(), 2, { tickTo: 1 })).toThrow(RangeError);
+  });
+});
 
 describe('analytics event queries', () => {
   it('is deterministic: same input twice gives identical output', () => {

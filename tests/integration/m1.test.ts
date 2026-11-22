@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createThreeNations,
   runThreeNations,
+  threeNationsSummary,
 } from '../../packages/scenarios/src/three-nations-trade-and-politics.js';
 import {
   decideInstitutionalPolicy,
@@ -255,6 +256,55 @@ describe('M1 integration: three-nations-trade-and-politics fixture', () => {
     expect(projection.world.unmet).toBe(unmetFromState);
   }, 600000);
 
+  it('summary carries an explicit deterministic final label block (harness, not M1 acceptance, SC-11 excluded)', () => {
+    const lines = threeNationsSummary(runThreeNations({ seed: 42, ticks: 5 }));
+    const label = lines.find((line) => line.startsWith('Final label: three-nations harness'))!;
+    expect(label).toBeDefined();
+    expect(label).toContain('fixture v');
+    expect(label).toContain('seed 42');
+    expect(label).toContain('ticks 5');
+    const state = lines.find((line) => line.startsWith('State hash: '))!;
+    const events = lines.find((line) => line.startsWith('Event hash: '))!;
+    expect(label).toContain(state.replace('State hash: ', ''));
+    expect(label).toContain(events.replace('Event hash: ', ''));
+    const status = lines.find((line) => line.startsWith('Status: '))!;
+    expect(status).toContain('NOT M1 acceptance');
+    expect(status).toContain('SC-11');
+    expect(status).toContain('excluded');
+    // determinism: same run config yields byte-identical summary (no wall-clock in the block)
+    expect(threeNationsSummary(runThreeNations({ seed: 42, ticks: 5 }))).toEqual(lines);
+  }, 600000);
+
+  it('publishes metrics v2 frames whose sparse price samples match economy.quotes at the final tick', () => {
+    const fixture = createThreeNations({ ticks: 3 });
+    for (let tick = 1; tick <= 3; tick++) {
+      for (const command of fixture.commandsForTick(tick)) fixture.engine.submit(command);
+      fixture.engine.step();
+    }
+    const domain = fixture.engine.getState().domain;
+    const metrics = domain['three-nations:metrics'] as { version: number; series: string[] };
+    expect(metrics.version).toBe(2);
+    expect(metrics.series).toHaveLength(3);
+    // publish is the last phase, so the final frame's samples must equal the final quotes exactly
+    const lastLine = metrics.series[metrics.series.length - 1]!;
+    const segments = lastLine.split('|');
+    expect(segments).toHaveLength(5);
+    const quotes = (domain.economy as { quotes: Record<string, { price: number }> }).quotes;
+    const expected: Record<string, Record<string, number>> = {};
+    for (const [k, q] of Object.entries(quotes)) {
+      const [cityId, commodityId] = JSON.parse(k) as [string, string];
+      (expected[cityId] ??= {})[commodityId] = q.price;
+    }
+    const parsed: Record<string, Record<string, number>> = {};
+    for (const entry of segments[4]!.split(';').filter(Boolean)) {
+      const [cityId, commodityId, price] = entry.split(':');
+      if (!cityId || !commodityId) throw new Error('malformed sample entry');
+      (parsed[cityId] ??= {})[commodityId] = Number(price);
+    }
+    expect(Object.keys(parsed).length).toBeGreaterThan(0); // tick > 0 with live quotes
+    expect(parsed).toEqual(expected);
+  }, 600000);
+
   it('is deterministic: two identically-driven engines produce identical state and event hashes', async () => {
     const runOnce = async () => {
       const run = await runFixtureInChild({ ticks: 60 });
@@ -373,11 +423,71 @@ describe('m1: shocks, SC-15 determinism at 1000 ticks, reconciliation, paginatio
     // separate built-scenario run pins the canonical hashes; concurrent CPU-heavy
     // tests on hosted runners can require more than 25 minutes for this one child.
     const a = await runThreeNationsInChild(1000);
-    expect(a.stateHash).toBe('90914b5792f1dfe324598c87c339e170d0abc613d964a8fab34c7a71e3f9bf18');
+    expect(a.stateHash).toBe('f7052866af0c7dc663aa4c12e256c3f3defda957b31ddd81346dc9a4372b12de');
     expect(a.eventHash).toBe('af179ccaea4845026a76e10e033310b17a83aee654cad9d2703da28bc7c5182e');
     expect(a.invariants.moneyConserved).toBe(true);
     expect(a.invariants.moneyNonnegative).toBe(true);
   }, 3300000);
+
+  it('W3 reconciliation: event pagination and tick windows over the real engine event ledger', async () => {
+    const run = await runFixtureInChild({ ticks: 60 });
+    const events = run.events;
+    expect(events.length).toBeGreaterThan(5);
+    // total == array length for several windows; every page matches an exact array slice
+    for (const [size, offset] of [
+      [10, 0],
+      [7, 5],
+      [10, Math.floor(events.length / 10) * 10],
+    ] as const) {
+      const page = queryEvents(events, {}, { size, offset });
+      expect(page.total).toBe(events.length);
+      expect(page.items).toEqual(events.slice(offset, offset + size));
+    }
+    // concatenation of all pages deep-equals the full array in order (byte-stable)
+    const stitched: EngineEvent[] = [];
+    let offset = 0;
+    let guard = 0;
+    let boundaryHasMore = true;
+    while (guard++ < 1000) {
+      const page = queryEvents(events, {}, { size: 5, offset });
+      stitched.push(...page.items);
+      boundaryHasMore = page.hasMore;
+      if (offset + 5 >= page.total) {
+        // exact boundary math: offset+size >= total → hasMore must be false
+        expect(page.hasMore).toBe(false);
+        break;
+      }
+      expect(page.hasMore).toBe(true);
+      offset += 5;
+    }
+    expect(stitched).toEqual(events);
+    void boundaryHasMore;
+    // a page ending exactly at total reports hasMore false
+    const exact = queryEvents(events, {}, { size: events.length, offset: 0 });
+    expect(exact.hasMore).toBe(false);
+    const onePast = queryEvents(events, {}, { size: 1, offset: events.length - 1 });
+    expect(onePast.hasMore).toBe(false);
+    // filtered subsets: counts match a manual count over the same array, items match the slice
+    const byType = events.filter((e) => e.type.startsWith('government.'));
+    const typed = queryEvents(events, { types: ['government.policy'] }, { size: 1000, offset: 0 });
+    expect(typed.total).toBe(events.filter((e) => e.type === 'government.policy').length);
+    expect(typed.items).toEqual(events.filter((e) => e.type === 'government.policy'));
+    expect(typed.total).toBeLessThanOrEqual(byType.length);
+    // time-range filter over a real run: ticks reconcile to real event ticks
+    const ticks = events.map((e) => e.tick);
+    const minTick = Math.min(...ticks);
+    const maxTick = Math.max(...ticks);
+    const midFrom = Math.min(minTick + 5, maxTick);
+    const ranged = queryEvents(
+      events,
+      { tickFrom: midFrom, tickTo: maxTick },
+      { size: 1000, offset: 0 },
+    );
+    expect(ranged.total).toBe(events.filter((e) => e.tick >= midFrom && e.tick <= maxTick).length);
+    expect(ranged.items.every((e) => e.tick >= midFrom && e.tick <= maxTick)).toBe(true);
+    expect(ranged.items).toEqual(events.filter((e) => e.tick >= midFrom && e.tick <= maxTick));
+    expect(ranged.total).toBeLessThan(events.length); // window actually narrowed
+  }, 1800000);
 
   it('reconciliation: final analytics projection city sums == kingdom sums == world totals == accounting treasuries', async () => {
     const run = await runFixtureInChild({ ticks: 250 });

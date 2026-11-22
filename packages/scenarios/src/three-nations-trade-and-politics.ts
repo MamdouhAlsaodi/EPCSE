@@ -1044,8 +1044,8 @@ export function createThreeNations(options: ThreeNationsOptions = {}): ThreeNati
   );
 
   interface MetricsState {
-    version: 1;
-    /** Compact per-tick frames: "<tick>|<produced,consumed,unmet,departed,arrived> per city;|<treasury per kingdom>|<staple per kingdom>", alphabetical city/kingdom order. */
+    version: 2;
+    /** Compact per-tick frames: "<tick>|<produced,consumed,unmet,departed,arrived> per city;|<treasury per kingdom>|<staple per kingdom>|<sparse city:commodity:price samples ';'-joined>", alphabetical city/kingdom order. */
     series: string[];
     /** Non-replayable scratch aggregates (excluded from the replayed frame contract). */
     aggCache?: {
@@ -1062,7 +1062,7 @@ export function createThreeNations(options: ThreeNationsOptions = {}): ThreeNati
   engine.registerPhaseSystem('publish', 'three-nations:metrics', (draft) => {
     if (!draft['three-nations:metrics']) {
       draft['three-nations:metrics'] = {
-        version: 1,
+        version: 2,
         series: [],
       } satisfies MetricsState;
     }
@@ -1147,16 +1147,38 @@ export function createThreeNations(options: ThreeNationsOptions = {}): ThreeNati
       const price = stapleKey !== undefined ? quotes?.[stapleKey]?.price : undefined;
       return typeof price === 'number' ? price : 0;
     });
+    // Sparse city price samples observed at THIS tick, parsed from the quotes keys (which are
+    // JSON.stringify([cityId, commodityId])). Alphabetical by city, then commodity; no
+    // backfilling or interpolation — absent quotes simply contribute nothing.
+    const sampleCities: Record<string, Record<string, number>> = {};
+    for (const [quoteKey, quote] of Object.entries(quotes ?? {})) {
+      const parsed = JSON.parse(quoteKey) as unknown;
+      if (!Array.isArray(parsed) || parsed.length !== 2) continue;
+      const [cityId, commodityId] = parsed as [string, string];
+      const price = quote?.price;
+      if (typeof price === 'number') (sampleCities[cityId] ??= {})[commodityId] = price;
+    }
+    const samplesSegment = Object.keys(sampleCities)
+      .sort()
+      .map((cityId) =>
+        Object.keys(sampleCities[cityId]!)
+          .sort()
+          .map((commodityId) => `${cityId}:${commodityId}:${sampleCities[cityId]![commodityId]}`)
+          .join(';'),
+      )
+      .filter((chunk) => chunk.length > 0)
+      .join(';');
     metrics.series.push(
-      `${tick}|${cityGroups.join(';')}|${treasuries.join(',')}|${staples.join(',')}`,
+      `${tick}|${cityGroups.join(';')}|${treasuries.join(',')}|${staples.join(',')}|${samplesSegment}`,
     );
   });
   engine.registerInvariant((draft) => {
     const metrics = draft['three-nations:metrics'] as MetricsState | undefined;
     if (!metrics) return;
-    if (metrics.version !== 1 || !Array.isArray(metrics.series))
+    if (metrics.version !== 2 || !Array.isArray(metrics.series))
       throw new TypeError('invalid three-nations metrics shape');
-    const frame = /^(\d+)\|([^|]+)\|([\d,]+)\|([\d,]+)$/;
+    const frame = /^(\d+)\|([^|]+)\|([\d,]+)\|([\d,]+)\|([^|]*)$/;
+    const citySet = new Set(sortedCities);
     for (const line of metrics.series) {
       const match = frame.exec(line);
       if (!match) throw new TypeError('malformed metrics frame');
@@ -1175,6 +1197,26 @@ export function createThreeNations(options: ThreeNationsOptions = {}): ThreeNati
         [...treasuries, ...staples].some((n) => !Number.isSafeInteger(n) || n < 0)
       )
         throw new TypeError('non-finite metrics kingdom data');
+      // samples segment: "cityId:commodity:price" entries, ';' joined, cities alphabetical,
+      // commodities alphabetical within each city, known city ids, safe nonnegative prices.
+      const sampleEntries = match[5]!.split(';').filter((entry) => entry.length > 0);
+      let lastCity: string | undefined;
+      let lastCommodity: string | undefined;
+      for (const entry of sampleEntries) {
+        const parts = entry.split(':');
+        const [cityId, commodityId, rawPrice] = parts as [string, string, string];
+        if (parts.length !== 3 || !citySet.has(cityId))
+          throw new TypeError('malformed metrics price sample');
+        const price = Number(rawPrice);
+        if (!Number.isSafeInteger(price) || price < 0)
+          throw new TypeError('non-finite metrics price sample');
+        if (lastCity === cityId && commodityId <= lastCommodity!)
+          throw new TypeError('unsorted metrics price samples within city');
+        if (lastCity !== undefined && cityId < lastCity)
+          throw new TypeError('unsorted metrics price sample cities');
+        lastCity = cityId;
+        lastCommodity = commodityId;
+      }
     }
   });
 
@@ -1524,6 +1566,10 @@ export function threeNationsSummary(report: ThreeNationsReport): string[] {
     `Invariants: money nonnegative ${report.invariants.moneyNonnegative}; stock nonnegative ${report.invariants.stockNonnegative}; money conserved ${report.invariants.moneyConserved}`,
     `State hash: ${report.stateHash}`,
     `Event hash: ${report.eventHash}`,
+    // Deterministic final label block: no timestamps, no wall-clock — byte-identical across runs
+    // (SC-15 enforces stdout equality over two independent 1000-tick CLI runs).
+    `Final label: three-nations harness fixture v${report.fixtureVersion}; seed ${report.config.seed}; ticks ${report.tick}; state ${report.stateHash}; events ${report.eventHash}`,
+    `Status: three-nations integration harness only — NOT M1 acceptance; SC-11 (government-transition politics) excluded from this slice`,
     report.disclaimer,
   ];
 }
