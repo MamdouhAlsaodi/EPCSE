@@ -65,6 +65,9 @@ importers:
 
   packages/analytics:
     dependencies:
+      '@epcse/scenarios':
+        specifier: workspace:*
+        version: link:../scenarios
       '@epcse/simulation-core':
         specifier: workspace:*
         version: link:../simulation-core
