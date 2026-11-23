@@ -21,12 +21,14 @@ describe('SC-15 built CLI determinism (three-nations, 1000 ticks, twice)', () =>
       '--ticks',
       '1000',
     ];
+    // CI shares two cores with other long-running fixture files. The CLI work
+    // can exceed 30 minutes under that contention even when hashes are stable.
     const [first, second] = await Promise.all([
-      cli(process.execPath, args, { timeout: 1800000 }),
-      cli(process.execPath, args, { timeout: 1800000 }),
+      cli(process.execPath, args, { timeout: 3_600_000 }),
+      cli(process.execPath, args, { timeout: 3_600_000 }),
     ]);
     expect(first.stdout).toBe(second.stdout);
     expect(first.stdout).toMatch(/State hash: [a-f0-9]{64}/);
     expect(first.stdout).toMatch(/Event hash: [a-f0-9]{64}/);
-  }, 2400000);
+  }, 4_200_000);
 });

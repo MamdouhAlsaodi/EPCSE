@@ -27,29 +27,74 @@ export class RunRepository {
   constructor(private readonly pool: Pool) {}
 
   /**
-   * One ACTIVE run per world, enforced by the partial unique index
-   * `runs_one_active_per_world` (isolation invariant; T19 counterfactual
-   * branches pass parentRunId/baseSnapshotId and close or branch the parent).
+   * One active PRIMARY run per world (parent_run_id IS NULL), enforced by the
+   * partial unique index `runs_one_active_per_world` (0002). Branch runs
+   * (parentRunId + baseSnapshotId, T19 counterfactual) are exempt from that
+   * single-primary invariant: multiple sibling branches of one parent may be
+   * concurrently active in the same world. Every branch open validates inside
+   * the parent-lock transaction that (a) the parent exists and is not closed,
+   * and (b) the base snapshot exists, belongs to the SAME world, and was
+   * written by the parent run — foreign parent/base pairings are rejected
+   * (including a parent run that lives in a DIFFERENT world: the parent lock
+   * reads both status and world_id, and the locked parent's world must equal
+   * the requested worldId). Parent transition + branch insert commit
+   * atomically.
+   *
+   * NOTE: openRun is NOT standalone proof of authenticated data. Branch bases
+   * must be consumed only via SnapshotRepository.loadSnapshot, which performs
+   * full HMAC verification; untrusted snapshot import is never allowed.
    */
   async openRun(
     worldId: string,
     opts: { seed: number; parentRunId?: string; baseSnapshotId?: string },
   ): Promise<RunRecord> {
     // Explicit branching (T19): opening a child run transitions the parent out
-    // of 'active' — the one-active-run-per-world partial unique index admits
-    // exactly one active run per world. Parent data is never modified.
+    // of 'active' — the one-active-PRIMARY-run-per-world partial unique index
+    // (0002) admits exactly one active primary run per world, while multiple
+    // ACTIVE sibling branches of the same parent are allowed. Parent data is
+    // never modified.
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       if (opts.parentRunId) {
-        const parent = await client.query('SELECT status FROM runs WHERE run_id = $1 FOR UPDATE', [
-          opts.parentRunId,
-        ]);
+        if (!opts.baseSnapshotId)
+          throw new RunConflictError('branching requires both parentRunId and baseSnapshotId');
+        // Lock selects BOTH status and world_id: a run id alone is not proof
+        // of world membership. A forged cross-world pairing (parent run from
+        // another world) must be rejected before any transition is staged.
+        const parent = await client.query(
+          'SELECT status, world_id FROM runs WHERE run_id = $1 FOR UPDATE',
+          [opts.parentRunId],
+        );
         if (!parent.rows[0]) throw new RunConflictError('parent run does not exist');
+        if (parent.rows[0].world_id !== worldId)
+          throw new RunConflictError(
+            `parent run ${opts.parentRunId} belongs to world ${parent.rows[0].world_id}, not ${worldId}`,
+          );
+        if (parent.rows[0].status === 'closed')
+          throw new RunConflictError(
+            `parent run ${opts.parentRunId} is closed and cannot be branched`,
+          );
+        // Reject foreign base snapshots: the fork base must be a snapshot of
+        // THIS world, written by THIS parent run (world/ownership integrity).
+        const base = await client.query(
+          'SELECT world_id, run_id FROM snapshots WHERE snapshot_id = $1 FOR UPDATE',
+          [opts.baseSnapshotId],
+        );
+        if (!base.rows[0] || base.rows[0].world_id !== worldId)
+          throw new RunConflictError(
+            `base snapshot ${opts.baseSnapshotId} does not belong to world ${worldId}`,
+          );
+        if (base.rows[0].run_id !== opts.parentRunId)
+          throw new RunConflictError(
+            `base snapshot ${opts.baseSnapshotId} was not written by parent run ${opts.parentRunId}`,
+          );
         await client.query(
           "UPDATE runs SET status = 'branched', updated_at = now() WHERE run_id = $1",
           [opts.parentRunId],
         );
+      } else if (opts.baseSnapshotId) {
+        throw new RunConflictError('baseSnapshotId without parentRunId is not a valid run opening');
       }
       try {
         const result = await client.query(
@@ -62,7 +107,7 @@ export class RunRepository {
         return mapRun(result.rows[0]!);
       } catch (error) {
         if (isUniqueViolation(error))
-          throw new RunConflictError(`world ${worldId} already has an active run`);
+          throw new RunConflictError(`world ${worldId} already has an active primary run`);
         throw error;
       }
     } catch (error) {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { projectWorld, projectSeries } from '../../packages/analytics/src/index.js';
+import { collectSubsidyTreasuryDebits } from '../../packages/analytics/src/compare.js';
 import {
   queryEvents,
   queryJournal,
@@ -338,5 +339,54 @@ describe('analytics journal queries', () => {
     expect(() => queryJournal(journal, {}, { size: 0, offset: 0 })).toThrow(RangeError);
     expect(() => queryJournal(journal, {}, { size: 2000, offset: 0 })).toThrow(RangeError);
     expect(() => queryJournal(journal, {}, { size: 2, offset: -2 })).toThrow(RangeError);
+  });
+});
+
+describe('collectSubsidyTreasuryDebits (SC-16 aggregation)', () => {
+  const entry = (causeId: string, effects: unknown[]) => ({ causeId, effects });
+  const debit = (amount: number) => ({
+    debit: 'plains-treasury',
+    credit: 'plain-central-residents-cash',
+    amount,
+  });
+  const journal = [
+    entry('purchase:plain-central-residents:grain', [debit(5)]),
+    entry('government:sc16-food-subsidy-a:purchase:plain-central-residents:grain', [
+      { debit: 'someone-else', credit: 'x', amount: 99 },
+      debit(4),
+    ]),
+    entry('government:sc16-food-subsidy-a:purchase:plain-market:grain', [debit(6)]),
+    entry('government:other-policy:purchase:plain-central-residents:grain', [debit(100)]),
+    entry('government:sc16-food-subsidy-a:purchase:plain-central-residents:grain', [
+      { debit: 'plains-treasury', credit: 'y' },
+    ]),
+  ];
+
+  it('collects every qualifying treasury debit across all subsidy purchase entries', () => {
+    const effects = collectSubsidyTreasuryDebits(journal, 'sc16-food-subsidy-a');
+    expect(effects).toEqual([
+      {
+        debit: 'plains-treasury',
+        amount: 4,
+        causeId: 'government:sc16-food-subsidy-a:purchase:plain-central-residents:grain',
+      },
+      {
+        debit: 'plains-treasury',
+        amount: 6,
+        causeId: 'government:sc16-food-subsidy-a:purchase:plain-market:grain',
+      },
+    ]);
+  });
+
+  it('aggregates the full treasury debit, not just the first effect', () => {
+    const effects = collectSubsidyTreasuryDebits(journal, 'sc16-food-subsidy-a');
+    const total = effects.reduce((sum, effect) => sum + effect.amount, 0);
+    expect(total).toBe(10);
+    expect(effects.length).toBeGreaterThan(1);
+  });
+
+  it('returns an empty list when no qualifying entries exist', () => {
+    expect(collectSubsidyTreasuryDebits([], 'sc16-food-subsidy-a')).toEqual([]);
+    expect(collectSubsidyTreasuryDebits(journal, 'sc16-nonexistent')).toEqual([]);
   });
 });
