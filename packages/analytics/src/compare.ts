@@ -4,6 +4,8 @@ import { projectWorld, type WorldProjection } from './projections.js';
 
 export interface ThreeNationsFoodSubsidyOptions {
   readonly seed?: number;
+  /** Opt-in versioned SC-16 setup; omit to run the unchanged default fixture. */
+  readonly counterfactualSetupVersion?: 1;
 }
 
 export interface CounterfactualProjection {
@@ -34,9 +36,13 @@ export interface ThreeNationsFoodSubsidyComparison {
   readonly policy: {
     readonly receipt: { readonly status: string; readonly commandId: string };
     readonly payment: { readonly amount: number; readonly causeId: string } | null;
+    /** Number of distinct qualifying treasury-debit journal effects (payment installments). */
+    readonly paymentCount: number;
     readonly fundedGuarantee: number;
+    /** Sum of ALL qualifying treasury debits, not just the first payment effect. */
     readonly treasuryDebit: number;
   };
+  readonly setup: { readonly version: number | null; readonly label: string | null };
   readonly initialBranchSnapshotsIdentical: boolean;
   readonly sourceSnapshotUnchanged: boolean;
   readonly conservation: { readonly a: boolean; readonly b: boolean };
@@ -101,6 +107,33 @@ function assertMoneyConserved(engine: Engine): boolean {
   );
 }
 
+/**
+ * Collects EVERY journal effect that debits the policy kingdom's treasury against an
+ * actual purchase settled under the given subsidy policy. A food-subsidy guarantee may be
+ * paid in several installments (each purchase below the remaining guarantee produces its
+ * own journal entry), so aggregation over all entries — not just the first — is required
+ * for honest treasury reconciliation. Pure function over the journal; no engine access.
+ */
+export function collectSubsidyTreasuryDebits(
+  journal: unknown,
+  policyId: string,
+): ReadonlyArray<{ readonly debit: string; readonly amount: number; readonly causeId: string }> {
+  const rows = Array.isArray(journal) ? journal : [];
+  const causePrefix = `government:${policyId}:purchase:`;
+  const effects: { debit: string; amount: number; causeId: string }[] = [];
+  for (const item of rows) {
+    const entry = asRecord(item);
+    if (typeof entry.causeId !== 'string' || !entry.causeId.startsWith(causePrefix)) continue;
+    for (const effect of Array.isArray(entry.effects) ? entry.effects : []) {
+      const value = asRecord(effect);
+      if (value.debit === 'plains-treasury' && typeof value.amount === 'number') {
+        effects.push({ debit: value.debit, amount: value.amount, causeId: entry.causeId });
+      }
+    }
+  }
+  return effects;
+}
+
 function delta<T extends Record<string, number>>(a: T, b: T): Record<string, number> {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
   return Object.fromEntries([...keys].sort().map((key) => [key, (a[key] ?? 0) - (b[key] ?? 0)]));
@@ -152,7 +185,13 @@ export function compareThreeNationsFoodSubsidy(
   options: ThreeNationsFoodSubsidyOptions = {},
 ): ThreeNationsFoodSubsidyComparison {
   const seed = options.seed ?? 42;
-  const optionsForFixture = { seed, ticks: 300 } as const;
+  const optionsForFixture = {
+    seed,
+    ticks: 300,
+    ...(options.counterfactualSetupVersion !== undefined
+      ? { counterfactualSetupVersion: options.counterfactualSetupVersion }
+      : {}),
+  } as const;
   const source = createThreeNations(optionsForFixture);
   const { engine, commandsForTick } = source;
   for (let tick = 1; tick <= 200; tick++) {
@@ -231,25 +270,9 @@ export function compareThreeNationsFoodSubsidy(
     throw new Error(`food-subsidy policy was not applied: ${JSON.stringify(receipt)}`);
   const accounting = asRecord(a.getState().domain.accounting);
   const journal = Array.isArray(accounting.journal) ? accounting.journal : [];
-  const payment = journal
-    .flatMap((item) => {
-      const entry = asRecord(item);
-      if (
-        typeof entry.causeId !== 'string' ||
-        !entry.causeId.startsWith('government:sc16-food-subsidy-a:purchase:')
-      )
-        return [];
-      return (Array.isArray(entry.effects) ? entry.effects : []).map((effect) => {
-        const value = asRecord(effect);
-        return {
-          debit: value.debit,
-          amount: value.amount,
-          causeId: entry.causeId,
-        };
-      });
-    })
-    .find((effect) => effect.debit === 'plains-treasury' && typeof effect.amount === 'number');
-  const treasuryDebit = payment && typeof payment.amount === 'number' ? payment.amount : 0;
+  const qualifying = collectSubsidyTreasuryDebits(journal, 'sc16-food-subsidy-a');
+  const payment = qualifying[0] ?? null;
+  const treasuryDebit = qualifying.reduce((sum, effect) => sum + effect.amount, 0);
   const finalA = project(a, 300);
   const finalB = project(b, 300);
   const sourceSnapshotUnchanged = engine.snapshotText() === sourceText;
@@ -269,8 +292,13 @@ export function compareThreeNationsFoodSubsidy(
         payment && typeof payment.amount === 'number' && typeof payment.causeId === 'string'
           ? { amount: payment.amount, causeId: payment.causeId }
           : null,
+      paymentCount: qualifying.length,
       fundedGuarantee: guarantee,
       treasuryDebit,
+    },
+    setup: {
+      version: source.config.counterfactualSetupVersion,
+      label: source.config.counterfactualSetupLabel,
     },
     initialBranchSnapshotsIdentical,
     sourceSnapshotUnchanged,

@@ -12,7 +12,7 @@ import {
   type VersionTuple,
 } from '../provenance.js';
 import { maxSnapshotBytesFromEnv, validateSnapshotText } from '../validation.js';
-import { snapshotProvenance, snapshots } from '../schema.js';
+import { snapshotProvenance, snapshots, runs } from '../schema.js';
 
 export class SnapshotRepository {
   private readonly db: ReturnType<typeof drizzle>;
@@ -44,7 +44,10 @@ export class SnapshotRepository {
   /**
    * Trusted-writer path: the ONLY way caller-side content may enter storage.
    * Atomic single transaction: snapshot row + provenance row commit together;
-   * a failed write publishes nothing partial.
+   * a failed write publishes nothing partial. When meta.runId is supplied it
+   * is verified INSIDE the transaction to reference a run of THIS world —
+   * a forged cross-world pairing (runId from another world) mutates nothing.
+   * Legacy usage without a runId remains legitimate (runId stored as NULL).
    */
   async saveSnapshot(
     worldId: string,
@@ -121,6 +124,20 @@ export class SnapshotRepository {
       phase: full.phase,
     };
     await this.db.transaction(async (tx) => {
+      if (runId !== null) {
+        // World-ownership integrity: the referenced run must exist in THIS
+        // world. Enforced inside the write transaction so no rows are
+        // published for a mismatched (worldId, runId) pairing.
+        const owner = await tx
+          .select({ worldId: runs.worldId })
+          .from(runs)
+          .where(eq(runs.runId, runId))
+          .limit(1);
+        if (!owner[0] || owner[0].worldId !== worldId)
+          throw new SnapshotProvenanceError(
+            `run ${runId} does not belong to world ${worldId}: cross-world snapshot write rejected`,
+          );
+      }
       await tx.insert(snapshots).values({
         snapshotId,
         worldId,
@@ -158,7 +175,15 @@ export class SnapshotRepository {
     };
   }
 
-  /** Full verification before bytes are returned: provenance first, then structure. */
+  /**
+   * Full verification before bytes are returned: provenance first, then
+   * structure. This method PERFORMS HMAC VERIFICATION — stored bytes are never
+   * trusted on their own. It is the sole authenticated read path: an
+   * `openRun` (or any run/snapshot identifier) is NOT standalone proof of
+   * authenticated data, and importing snapshots from untrusted sources
+   * (bypassing loadSnapshot) is never allowed — every restore must go
+   * through this verified loader.
+   */
   async loadSnapshot(
     worldId: string,
     snapshotId: string,

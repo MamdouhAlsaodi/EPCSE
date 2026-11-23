@@ -8,6 +8,7 @@ import {
   SnapshotSizeError,
   computePayloadSha256,
   runMigrations,
+  MIGRATIONS,
   createSnapshotRepository,
   createRunRepository,
 } from '../../packages/persistence/src/index.js';
@@ -224,6 +225,142 @@ describe.skipIf(db.pool === null)('persistence integration (real PostgreSQL)', (
     await runs.closeRun(branch.runId);
   });
 
+  it('admits two concurrently-active sibling branches of one parent (T19 SC-16)', async () => {
+    const parent = await runs.openRun('w-siblings', { seed: 7 });
+    const engine = scenario();
+    engine.run(30);
+    const snap = await snapshots.saveSnapshot('w-siblings', engine.snapshotText(), {
+      runId: parent.runId,
+      tick: 30,
+      writerId: 'writer-1',
+    });
+    const a = await runs.openRun('w-siblings', {
+      seed: 7,
+      parentRunId: parent.runId,
+      baseSnapshotId: snap.snapshotId,
+    });
+    // Second sibling must NOT raise RunConflictError (0002 narrows the unique
+    // index to primary runs; both branches share the same world).
+    const b = await runs.openRun('w-siblings', {
+      seed: 7,
+      parentRunId: parent.runId,
+      baseSnapshotId: snap.snapshotId,
+    });
+    expect(b.runId).not.toBe(a.runId);
+    expect(b.parentRunId).toBe(parent.runId);
+    expect(b.baseSnapshotId).toBe(snap.snapshotId);
+    // Siblings are isolated: disjoint command logs for the same commandId.
+    await runs.appendCommand(a.runId, 'shared-cmd', { type: 'transfer', amount: 1 });
+    await runs.appendCommand(b.runId, 'shared-cmd', { type: 'transfer', amount: 2 });
+    await runs.appendCommand(b.runId, 'b-only-cmd', { type: 'transfer', amount: 3 });
+    await expect(
+      runs.appendCommand(b.runId, 'b-only-cmd', { type: 'transfer', amount: 4 }),
+    ).rejects.toBeInstanceOf(RunConflictError);
+    expect((await runs.listCommands(a.runId)).map((c) => c.commandId)).toEqual(['shared-cmd']);
+    expect((await runs.listCommands(b.runId)).map((c) => c.commandId)).toEqual([
+      'shared-cmd',
+      'b-only-cmd',
+    ]);
+    // Exactly one active PRIMARY run is still enforced even while branches exist.
+    const primary = await runs.openRun('w-siblings-primary', { seed: 1 });
+    await expect(runs.openRun('w-siblings-primary', { seed: 1 })).rejects.toBeInstanceOf(
+      RunConflictError,
+    );
+    await runs.closeRun(primary.runId);
+    await runs.closeRun(a.runId);
+    await runs.closeRun(b.runId);
+    await runs.closeRun(parent.runId);
+  });
+
+  it('rejects foreign base snapshots and mismatched parent/snapshot pairings', async () => {
+    const parent = await runs.openRun('w-foreign', { seed: 7 });
+    const engine = scenario();
+    engine.run(10);
+    const snap = await snapshots.saveSnapshot('w-foreign', engine.snapshotText(), {
+      runId: parent.runId,
+      tick: 10,
+      writerId: 'writer-1',
+    });
+    const otherWorld = await runs.openRun('w-foreign-other', { seed: 7 });
+    const otherSnap = await snapshots.saveSnapshot('w-foreign-other', engine.snapshotText(), {
+      runId: otherWorld.runId,
+      tick: 10,
+      writerId: 'writer-1',
+    });
+    // Foreign world: snapshot belongs to a different world.
+    await expect(
+      runs.openRun('w-foreign', {
+        seed: 7,
+        parentRunId: parent.runId,
+        baseSnapshotId: otherSnap.snapshotId,
+      }),
+    ).rejects.toBeInstanceOf(RunConflictError);
+    // Foreign parent: snapshot written by a run that is not the named parent.
+    await expect(
+      runs.openRun('w-foreign', {
+        seed: 7,
+        parentRunId: otherWorld.runId,
+        baseSnapshotId: snap.snapshotId,
+      }),
+    ).rejects.toBeInstanceOf(RunConflictError);
+    // Unknown base snapshot id.
+    await expect(
+      runs.openRun('w-foreign', {
+        seed: 7,
+        parentRunId: parent.runId,
+        baseSnapshotId: '00000000-0000-0000-0000-000000000000',
+      }),
+    ).rejects.toBeInstanceOf(RunConflictError);
+    // Half-specified branch options are invalid.
+    await expect(
+      runs.openRun('w-foreign', { seed: 7, parentRunId: parent.runId }),
+    ).rejects.toBeInstanceOf(RunConflictError);
+    await expect(
+      runs.openRun('w-foreign', { seed: 7, baseSnapshotId: snap.snapshotId }),
+    ).rejects.toBeInstanceOf(RunConflictError);
+    await runs.closeRun(parent.runId);
+    await runs.closeRun(otherWorld.runId);
+  });
+
+  it('rolls back the parent branch transition when the fork insert fails (atomicity)', async () => {
+    const parent = await runs.openRun('w-atomic-branch', { seed: 7 });
+    // Force a failure INSIDE the branch transaction after the parent status
+    // update is staged: the base snapshot belongs to a foreign world, so the
+    // validation (which runs after the UPDATE statement) throws.
+    const foreignWorld = await runs.openRun('w-atomic-branch-other', { seed: 7 });
+    const foreignSnap = await snapshots.saveSnapshot('w-atomic-branch-other', snapText(1), {
+      runId: foreignWorld.runId,
+      tick: 1,
+      writerId: 'writer-1',
+    });
+    await expect(
+      runs.openRun('w-atomic-branch', {
+        seed: 7,
+        parentRunId: parent.runId,
+        baseSnapshotId: foreignSnap.snapshotId,
+      }),
+    ).rejects.toBeInstanceOf(RunConflictError);
+    // The parent must still be 'active': the staged status update rolled back.
+    expect((await runs.getRun(parent.runId))?.status).toBe('active');
+    // After rollback, the parent can still be branched for real.
+    const engine = scenario();
+    engine.run(5);
+    const snap = await snapshots.saveSnapshot('w-atomic-branch', engine.snapshotText(), {
+      runId: parent.runId,
+      tick: 5,
+      writerId: 'writer-1',
+    });
+    const branch = await runs.openRun('w-atomic-branch', {
+      seed: 7,
+      parentRunId: parent.runId,
+      baseSnapshotId: snap.snapshotId,
+    });
+    expect((await runs.getRun(parent.runId))?.status).toBe('branched');
+    await runs.closeRun(branch.runId);
+    await runs.closeRun(parent.runId);
+    await runs.closeRun(foreignWorld.runId);
+  });
+
   it('publishes nothing when the provenance insert fails (atomic write)', async () => {
     const beforeSnapshots = await rowCount('snapshots');
     const beforeProvenance = await rowCount('snapshot_provenance');
@@ -352,6 +489,138 @@ describe.skipIf(db.pool === null)('persistence integration (real PostgreSQL)', (
     } finally {
       process.env.EPCSE_SNAPSHOT_HMAC_KEY = previous;
     }
+  });
+
+  it('rejects a FORGED cross-world pairing: branching with a parent run from another world mutates nothing', async () => {
+    const parent = await runs.openRun('w-forged-pair', { seed: 7 });
+    const engine = scenario();
+    engine.run(5);
+    const snap = await snapshots.saveSnapshot('w-forged-pair', engine.snapshotText(), {
+      runId: parent.runId,
+      tick: 5,
+      writerId: 'writer-1',
+    });
+    const attacker = await runs.openRun('w-forged-other', { seed: 7 });
+    const runsBefore = await rowCount('runs');
+    const snapshotsBefore = await rowCount('snapshots');
+    // Parent exists but lives in a DIFFERENT world than requested: must be
+    // rejected and no run inserted / parent transitioned.
+    await expect(
+      runs.openRun('w-forged-target', {
+        seed: 7,
+        parentRunId: parent.runId,
+        baseSnapshotId: snap.snapshotId,
+      }),
+    ).rejects.toBeInstanceOf(RunConflictError);
+    expect(await rowCount('runs')).toBe(runsBefore);
+    expect(await rowCount('snapshots')).toBe(snapshotsBefore);
+    expect((await runs.getRun(parent.runId))?.status).toBe('active');
+    // Same forged pairing via saveSnapshot: runId belongs to another world.
+    await expect(
+      snapshots.saveSnapshot('w-forged-target', snapText(1), {
+        runId: parent.runId,
+        tick: 1,
+        writerId: 'writer-1',
+      }),
+    ).rejects.toBeInstanceOf(SnapshotProvenanceError);
+    await expect(
+      snapshots.saveSnapshotForged('w-forged-target', snapText(1), {
+        runId: attacker.runId,
+        tick: 1,
+        writerId: 'writer-1',
+      }),
+    ).rejects.toBeInstanceOf(SnapshotProvenanceError);
+    expect(await rowCount('snapshots')).toBe(snapshotsBefore);
+    expect(await rowCount('snapshot_provenance')).toBe(snapshotsBefore);
+    // Legitimate old usage (runId omitted) is still accepted.
+    await snapshots.saveSnapshot('w-forged-target', snapText(0), {
+      tick: 0,
+      writerId: 'writer-1',
+    });
+    expect(await rowCount('snapshots')).toBe(snapshotsBefore + 1);
+    await runs.closeRun(parent.runId);
+    await runs.closeRun(attacker.runId);
+  });
+
+  it('serializes concurrent fresh migrations before the migrations table exists', async () => {
+    // Isolated empty schema on the real test DB: unlike the main suite pool,
+    // there is NO schema_migrations table before these six runners race.
+    const schema = `t19_migrations_${process.pid}_${Date.now()}`;
+    await pool.query(`CREATE SCHEMA "${schema}"`);
+    const fresh = new Pool({
+      connectionString: DATABASE_URL,
+      options: `-c search_path=${schema}`,
+      max: 8,
+    });
+    try {
+      const absent = await fresh.query('SELECT to_regclass($1) AS name', [
+        `${schema}.schema_migrations`,
+      ]);
+      expect(absent.rows[0]?.name).toBeNull();
+      const racing = await Promise.all(Array.from({ length: 6 }, () => runMigrations(fresh)));
+      expect(racing).toHaveLength(6);
+      const versions = await fresh.query(
+        'SELECT version, count(*)::int AS n FROM schema_migrations GROUP BY version ORDER BY version',
+      );
+      expect(versions.rows).toEqual(
+        MIGRATIONS.map((migration) => ({ version: migration.version, n: 1 })),
+      );
+      const idx = await fresh.query(
+        "SELECT count(*)::int AS n FROM pg_indexes WHERE schemaname = $1 AND indexname = 'runs_one_active_per_world'",
+        [schema],
+      );
+      expect(idx.rows[0]!.n).toBe(1);
+    } finally {
+      await fresh.end();
+      await pool.query(`DROP SCHEMA "${schema}" CASCADE`);
+    }
+  });
+
+  it('truly concurrently opens sibling branches: exactly one parent transition, both branches active, data intact', async () => {
+    const parent = await runs.openRun('w-concurrent-sib', { seed: 7 });
+    const engine = scenario();
+    engine.run(10);
+    const snap = await snapshots.saveSnapshot('w-concurrent-sib', engine.snapshotText(), {
+      runId: parent.runId,
+      tick: 10,
+      writerId: 'writer-1',
+    });
+    // Race two sibling opens of the same parent at the exact same time.
+    const [a, b] = await Promise.all([
+      runs.openRun('w-concurrent-sib', {
+        seed: 7,
+        parentRunId: parent.runId,
+        baseSnapshotId: snap.snapshotId,
+      }),
+      runs.openRun('w-concurrent-sib', {
+        seed: 7,
+        parentRunId: parent.runId,
+        baseSnapshotId: snap.snapshotId,
+      }),
+    ]);
+    expect(a.runId).not.toBe(b.runId);
+    expect(a.parentRunId).toBe(parent.runId);
+    expect(b.parentRunId).toBe(parent.runId);
+    // Both siblings concurrently active in the same world.
+    expect(a.status).toBe('active');
+    expect(b.status).toBe('active');
+    // Parent transitioned exactly once, still exists, data untouched.
+    const parentAfter = await runs.getRun(parent.runId);
+    expect(parentAfter?.status).toBe('branched');
+    expect(parentAfter?.parentRunId).toBeNull();
+    expect(parentAfter?.baseSnapshotId).toBeNull();
+    // The parent is now 'branched', not active: one new active primary is
+    // permitted alongside branches, but a SECOND active primary is rejected.
+    const newPrimary = await runs.openRun('w-concurrent-sib', { seed: 7 });
+    await expect(runs.openRun('w-concurrent-sib', { seed: 7 })).rejects.toBeInstanceOf(
+      RunConflictError,
+    );
+    // Parent command log untouched by the raced forks.
+    expect((await runs.listCommands(parent.runId)).map((c) => c.commandId)).toEqual([]);
+    await runs.closeRun(newPrimary.runId);
+    await runs.closeRun(a.runId);
+    await runs.closeRun(b.runId);
+    await runs.closeRun(parent.runId);
   });
 });
 

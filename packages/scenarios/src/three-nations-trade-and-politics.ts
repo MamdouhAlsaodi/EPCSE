@@ -22,6 +22,24 @@ import {
 
 export const THREE_NATIONS_FIXTURE_VERSION = 1 as const;
 
+/**
+ * Opt-in, versioned SC-16 counterfactual setup. Applied at fixture construction (before tick 0),
+ * so both counterfactual branches fork from an identical trusted tick-200 snapshot that already
+ * contains naturally sustained purchasable food and resident funding common to both branches.
+ * The default fixture (no option) is unchanged, preserving its canonical hashes.
+ */
+export const THREE_NATIONS_COUNTERFACTUAL_SETUP = {
+  1: {
+    label:
+      'SC-16 opt-in counterfactual setup v1: plain-central residents funded and farm-owner supplied with grain from tick 0 (common to both branches)',
+    plainCentralResidentsOpeningBudget: 30000,
+    farmOwnerOpeningGrain: 4000,
+  },
+} as const;
+
+export type ThreeNationsCounterfactualSetupVersion =
+  keyof typeof THREE_NATIONS_COUNTERFACTUAL_SETUP & 1;
+
 export type ThreeNationsShock =
   | {
       readonly kind: 'route-close';
@@ -61,6 +79,8 @@ export interface ThreeNationsOptions {
   readonly kingdoms?: readonly ThreeNationsKingdomId[];
   readonly shock?: ThreeNationsShock | null;
   readonly variant?: ThreeNationsVariant;
+  /** Opt-in versioned SC-16 setup; omit for the unchanged default fixture. */
+  readonly counterfactualSetupVersion?: ThreeNationsCounterfactualSetupVersion;
 }
 
 export interface ResolvedThreeNationsConfig {
@@ -71,6 +91,8 @@ export interface ResolvedThreeNationsConfig {
   readonly kingdomGovernmentForms: Readonly<Record<string, string>>;
   readonly shock: ThreeNationsShock | null;
   readonly variant: ThreeNationsVariant;
+  readonly counterfactualSetupVersion: ThreeNationsCounterfactualSetupVersion | null;
+  readonly counterfactualSetupLabel: string | null;
   readonly counts: {
     readonly kingdoms: number;
     readonly cities: number;
@@ -218,6 +240,19 @@ function resolveConfig(options: ThreeNationsOptions): ResolvedThreeNationsConfig
     if (!Number.isSafeInteger(variant.migrationBudget) || variant.migrationBudget < 0)
       throw new RangeError('migrationBudget must be a nonnegative safe integer');
   }
+  let counterfactualSetupVersion: ResolvedThreeNationsConfig['counterfactualSetupVersion'] = null;
+  let counterfactualSetupLabel: ResolvedThreeNationsConfig['counterfactualSetupLabel'] = null;
+  if (options.counterfactualSetupVersion !== undefined) {
+    const version = options.counterfactualSetupVersion;
+    if (version !== 1 || !(version in THREE_NATIONS_COUNTERFACTUAL_SETUP))
+      throw new RangeError(
+        `unsupported counterfactualSetupVersion ${String(version)}; supported: ${Object.keys(THREE_NATIONS_COUNTERFACTUAL_SETUP).join(', ')}`,
+      );
+    if (!kingdoms.includes('plains'))
+      throw new RangeError('counterfactualSetupVersion requires the plains kingdom');
+    counterfactualSetupVersion = version;
+    counterfactualSetupLabel = THREE_NATIONS_COUNTERFACTUAL_SETUP[version].label;
+  }
   return {
     fixtureVersion: THREE_NATIONS_FIXTURE_VERSION,
     seed,
@@ -228,6 +263,8 @@ function resolveConfig(options: ThreeNationsOptions): ResolvedThreeNationsConfig
     ),
     shock,
     variant,
+    counterfactualSetupVersion,
+    counterfactualSetupLabel,
     counts: {
       kingdoms: kingdoms.length,
       cities: kingdoms.length * 4,
@@ -636,6 +673,18 @@ export function createThreeNations(options: ThreeNationsOptions = {}): ThreeNati
     kingdoms.flatMap((k) => LAYOUTS[k].cities.map((city) => [city, k])),
   );
   const specs = cohortSpecs(kingdoms, variant);
+  const setup =
+    config.counterfactualSetupVersion !== null
+      ? THREE_NATIONS_COUNTERFACTUAL_SETUP[config.counterfactualSetupVersion]
+      : undefined;
+  if (setup) {
+    // Opt-in SC-16 setup v1, applied at construction (before tick 0) so it is common to
+    // both counterfactual branches and baked into the trusted tick-200 snapshot.
+    const residents = specs.find((s) => s.cohort.id === 'plain-central-residents');
+    if (!residents) throw new TypeError('counterfactual setup v1 requires plain-central-residents');
+    (residents.cohort as { openingBudget: number }).openingBudget =
+      setup.plainCentralResidentsOpeningBudget;
+  }
   const sellers = sellerSpecs(kingdoms);
   const producers: ProducerDef[] = PRODUCERS.filter((p) => cityIds.includes(p.cityId)).map((p) => ({
     ...p,
@@ -748,6 +797,15 @@ export function createThreeNations(options: ThreeNationsOptions = {}): ThreeNati
         })),
       ),
     ...warehouseStock.filter((entry) => ownerSet.has(entry.ownerId)),
+    ...(setup
+      ? [
+          {
+            ownerId: 'farm-owner',
+            commodity: 'grain',
+            quantity: setup.farmOwnerOpeningGrain,
+          },
+        ]
+      : []),
   ];
 
   const economy: LocalEconomyConfig = {
